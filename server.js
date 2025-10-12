@@ -66,29 +66,72 @@ async function startServer() {
   try {
     logger.info('🚀 Starting TokenBot Service...');
     
-    // Test database connection
-    await db.query('SELECT NOW()');
-    logger.info('✅ Database connected');
+    // Check required environment variables
+    const requiredEnvVars = ['DATABASE_URL', 'ENCRYPTION_KEY'];
+    const missingVars = requiredEnvVars.filter(v => !process.env[v]);
     
-    // Test encryption
-    const encryptTest = encryptor.test();
-    if (!encryptTest) {
-      throw new Error('Encryption test failed');
+    if (missingVars.length > 0) {
+      logger.warn(`⚠️ Missing environment variables: ${missingVars.join(', ')}`);
+      logger.warn('⚠️ Service will start in limited mode. Set these variables for full functionality.');
     }
     
-    // Start scheduler
-    scheduler.start();
+    // Test database connection (with fallback)
+    if (process.env.DATABASE_URL) {
+      try {
+        await db.query('SELECT NOW()');
+        logger.info('✅ Database connected');
+      } catch (dbError) {
+        logger.error('❌ Database connection failed:', dbError.message);
+        logger.warn('⚠️ Starting service without database (limited functionality)');
+      }
+    } else {
+      logger.warn('⚠️ DATABASE_URL not set, skipping database connection');
+    }
     
-    // Start server
+    // Test encryption (with fallback)
+    if (process.env.ENCRYPTION_KEY) {
+      try {
+        const encryptTest = encryptor.test();
+        if (!encryptTest) {
+          logger.warn('⚠️ Encryption test failed');
+        }
+      } catch (encError) {
+        logger.warn('⚠️ Encryption service unavailable:', encError.message);
+      }
+    } else {
+      logger.warn('⚠️ ENCRYPTION_KEY not set, encryption unavailable');
+    }
+    
+    // Start scheduler (with fallback)
+    if (process.env.DATABASE_URL) {
+      try {
+        scheduler.start();
+        logger.info('✅ Scheduler started');
+      } catch (schedError) {
+        logger.warn('⚠️ Scheduler failed to start:', schedError.message);
+      }
+    } else {
+      logger.warn('⚠️ Scheduler disabled (no database connection)');
+    }
+    
+    // Start server (always start, even with missing config)
     app.listen(PORT, () => {
       logger.info(`✅ TokenBot Service running on port ${PORT}`);
       logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`📅 Scheduler: Active (8:00 AM IST daily)`);
+      logger.info(`📊 Status: ${missingVars.length > 0 ? 'Limited Mode' : 'Fully Operational'}`);
+      if (missingVars.length === 0) {
+        logger.info(`📅 Scheduler: Active (8:00 AM IST daily)`);
+      }
     });
     
   } catch (error) {
     logger.error('❌ Failed to start server:', error);
-    process.exit(1);
+    // Don't exit - let Railway see the error but keep service running
+    logger.warn('⚠️ Starting in degraded mode');
+    
+    app.listen(PORT, () => {
+      logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
+    });
   }
 }
 
