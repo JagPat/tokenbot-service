@@ -1,0 +1,10 @@
+[build]
+builder = "nixpacks"
+watchPatterns = ["**/*.js", "package.json", "services/**", "routes/**", "config/**"]
+
+[deploy]
+startCommand = "npm start"
+restartPolicyType = "always"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
