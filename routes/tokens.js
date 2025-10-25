@@ -100,13 +100,12 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
     
     logger.info(`🔍 Token requested for user: ${userId}`);
     
-    const token = await tokenManager.getValidToken(userId);
+    const token = await tokenManager.getCurrentToken(userId);
     
     if (!token) {
       return res.status(404).json({
         success: false,
-        error: 'No valid token found',
-        message: 'User needs to refresh token or configure credentials'
+        error: 'No token found for user'
       });
     }
 
