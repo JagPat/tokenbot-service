@@ -91,6 +91,46 @@ router.get('/status', authenticateUser, async (req, res, next) => {
 });
 
 /**
+ * GET /api/tokens/current
+ * Get current token for a user
+ */
+router.get('/current', authenticateService, async (req, res, next) => {
+  try {
+    const { user_id } = req.query;
+    
+    if (!user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: user_id'
+      });
+    }
+    
+    logger.info(`🔍 Getting current token for user: ${user_id}`);
+    
+    const tokenData = await tokenManager.getCurrentToken(user_id);
+    
+    if (!tokenData) {
+      return res.status(404).json({
+        success: false,
+        error: 'No token found for user'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: tokenData
+    });
+    
+  } catch (error) {
+    logger.error('Error getting current token:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * GET /api/tokens/:userId (Service-to-service only)
  * Get valid token for a user (for AI trading backend)
  */
@@ -197,46 +237,6 @@ router.post('/store', authenticateService, async (req, res, next) => {
     
   } catch (error) {
     logger.error('Error storing token data:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * GET /api/tokens/current
- * Get current token for a user
- */
-router.get('/current', authenticateService, async (req, res, next) => {
-  try {
-    const { user_id } = req.query;
-    
-    if (!user_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required parameter: user_id'
-      });
-    }
-    
-    logger.info(`🔍 Getting current token for user: ${user_id}`);
-    
-    const tokenData = await tokenManager.getCurrentToken(user_id);
-    
-    if (!tokenData) {
-      return res.status(404).json({
-        success: false,
-        error: 'No token found for user'
-      });
-    }
-    
-    res.json({
-      success: true,
-      data: tokenData
-    });
-    
-  } catch (error) {
-    logger.error('Error getting current token:', error);
     res.status(500).json({
       success: false,
       error: error.message
