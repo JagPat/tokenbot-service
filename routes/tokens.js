@@ -6,13 +6,39 @@ const logger = require('../utils/logger');
 
 /**
  * POST /api/tokens/refresh
- * Manual token refresh
+ * Token refresh (supports both user and service authentication)
  */
-router.post('/refresh', authenticateUser, async (req, res, next) => {
+router.post('/refresh', async (req, res, next) => {
   try {
-    const { user_id } = req.user;
+    // Support both user authentication and service-to-service calls
+    let user_id = null;
     
-    logger.info(`🔄 Manual token refresh requested for user: ${user_id}`);
+    // Check if authenticated user (user endpoint)
+    if (req.user && req.user.user_id) {
+      user_id = req.user.user_id;
+      logger.info(`🔄 User token refresh requested for user: ${user_id}`);
+    } 
+    // Check if service-to-service call (backend endpoint)
+    else if (req.body.user_id || req.query.user_id) {
+      // Verify service API key for service-to-service calls
+      const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+      const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
+      
+      if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized service call'
+        });
+      }
+      
+      user_id = req.body.user_id || req.query.user_id;
+      logger.info(`🔄 Service token refresh requested for user: ${user_id}`);
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing user_id'
+      });
+    }
     
     const tokenData = await tokenManager.refreshTokenForUser(user_id);
     
@@ -20,6 +46,7 @@ router.post('/refresh', authenticateUser, async (req, res, next) => {
       success: true, 
       message: 'Token refreshed successfully',
       data: {
+        access_token: tokenData.access_token,
         expires_at: tokenData.expires_at,
         login_time: tokenData.login_time,
         execution_time_ms: tokenData.execution_time_ms
