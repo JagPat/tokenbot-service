@@ -47,13 +47,9 @@ USER tokenbot
 # Expose port
 EXPOSE 3000
 
-# Health check using wget (built-in) or curl if available
-# Fallback to node if curl is not available
+# Health check using Node.js (always available, no dependency on curl)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })" || \
-  (command -v curl >/dev/null && curl -f http://localhost:3000/health) || \
-  (command -v wget >/dev/null && wget --quiet --spider http://localhost:3000/health) || \
-  exit 1
+  CMD node -e "require('http').get('http://localhost:3000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 # Start application
 CMD ["npm", "start"]
