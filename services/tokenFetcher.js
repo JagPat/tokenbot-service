@@ -54,11 +54,14 @@ class TokenFetcher {
         'input[name="totp"]',             // Name-based selector
         'input[id="totp"]',               // Explicit ID selector
         '#totpcode',                       // Alternative ID
-        'input[placeholder*="TOTP" i]',   // Placeholder-based (case-insensitive)
-        'input[placeholder*="totp" i]',   // Lowercase placeholder
-        'input[type="text"]',             // Generic text input (fallback)
+        'input[placeholder*="TOTP"]',      // Placeholder-based (uppercase)
+        'input[placeholder*="totp"]',      // Placeholder-based (lowercase)
+        'input[placeholder*="Totp"]',      // Placeholder-based (mixed case)
+        'input[type="text"]',             // Generic text input (fallback - last resort)
         '.totp-input',                     // Class-based selector
-        '[data-name="totp"]'               // Data attribute selector
+        '[data-name="totp"]',              // Data attribute selector
+        'input.autocomplete',              // Common autocomplete class
+        'input[autocomplete="one-time-code"]' // Standard TOTP autocomplete
       ];
       
       let totpFieldFound = false;
@@ -121,11 +124,13 @@ class TokenFetcher {
       // Find and click submit button (try multiple selectors)
       const submitSelectors = [
         'button[type="submit"]',
-        'button:contains("Login")',
         'input[type="submit"]',
         'button.submit',
         'button.login',
-        'form button[type="button"]' // Some forms use button instead of submit
+        'button[class*="submit"]',
+        'button[class*="login"]',
+        'form button[type="button"]', // Some forms use button instead of submit
+        'button' // Generic button as last resort
       ];
       
       let submitButtonClicked = false;
@@ -133,12 +138,20 @@ class TokenFetcher {
         try {
           const submitButton = await page.$(submitSelector);
           if (submitButton) {
-            const isVisible = await page.evaluate((sel) => {
+            const buttonInfo = await page.evaluate((sel) => {
               const btn = document.querySelector(sel);
-              return btn && btn.offsetParent !== null;
+              if (!btn) return null;
+              
+              return {
+                visible: btn.offsetParent !== null,
+                text: btn.textContent || btn.innerText || '',
+                type: btn.type || '',
+                hasLoginText: (btn.textContent || btn.innerText || '').toLowerCase().includes('login') ||
+                             (btn.textContent || btn.innerText || '').toLowerCase().includes('submit')
+              };
             }, submitSelector);
             
-            if (isVisible) {
+            if (buttonInfo && buttonInfo.visible && (buttonInfo.type === 'submit' || buttonInfo.hasLoginText || submitSelector.includes('submit'))) {
               logger.info(`✅ Clicking submit button with selector: ${submitSelector}`);
               await page.click(submitSelector);
               submitButtonClicked = true;
