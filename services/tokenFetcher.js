@@ -278,10 +278,10 @@ class TokenFetcher {
       // Step 4: Wait for redirect and extract request token
       logger.info('⏳ Waiting for authentication redirect');
       await page.waitForNavigation({ timeout: 15000 });
-      const currentUrl = page.url();
-      logger.info(`🔗 Redirected to: ${currentUrl}`);
+      const redirectUrl = page.url();
+      logger.info(`🔗 Redirected to: ${redirectUrl}`);
       
-      const requestToken = new URL(currentUrl).searchParams.get('request_token');
+      const requestToken = new URL(redirectUrl).searchParams.get('request_token');
       if (!requestToken) {
         throw new Error('Request token not found in redirect URL');
       }
