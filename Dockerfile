@@ -1,6 +1,7 @@
 FROM node:18-alpine
 
 # Install system dependencies with proper error handling and cleanup
+# Split curl installation separately to handle network issues gracefully
 RUN apk update && \
     apk add --no-cache \
     chromium \
@@ -9,8 +10,12 @@ RUN apk update && \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
-    curl \
     && rm -rf /var/cache/apk/*
+
+# Install curl separately with retry logic for network resilience
+RUN apk add --no-cache curl || \
+    (sleep 2 && apk update && apk add --no-cache curl) || \
+    echo "Warning: curl installation failed, health check may not work"
 
 # Tell Puppeteer to skip downloading Chrome and use system Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
@@ -42,9 +47,13 @@ USER tokenbot
 # Expose port
 EXPOSE 3000
 
-# Health check using curl
+# Health check using wget (built-in) or curl if available
+# Fallback to node if curl is not available
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
+  CMD node -e "require('http').get('http://localhost:3000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })" || \
+  (command -v curl >/dev/null && curl -f http://localhost:3000/health) || \
+  (command -v wget >/dev/null && wget --quiet --spider http://localhost:3000/health) || \
+  exit 1
 
 # Start application
 CMD ["npm", "start"]
