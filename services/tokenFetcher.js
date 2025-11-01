@@ -447,13 +447,74 @@ class TokenFetcher {
       
       // Step 4: Wait for redirect and extract request token
       logger.info('⏳ Waiting for authentication redirect');
-      await page.waitForNavigation({ timeout: 15000 });
+      
+      // Wait for navigation with multiple strategies
+      try {
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 })
+        ]);
+      } catch (navError) {
+        logger.warn('⚠️ Navigation timeout, checking current URL anyway');
+      }
+      
+      // Wait a bit more for any client-side redirects
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
       const redirectUrl = page.url();
       logger.info(`🔗 Redirected to: ${redirectUrl}`);
       
-      const requestToken = new URL(redirectUrl).searchParams.get('request_token');
+      // Try to extract request_token from multiple locations
+      let requestToken = null;
+      
+      try {
+        // Try query parameter first (most common)
+        const urlObj = new URL(redirectUrl);
+        requestToken = urlObj.searchParams.get('request_token');
+        
+        // Try hash fragment if not in query params
+        if (!requestToken && urlObj.hash) {
+          const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+          requestToken = hashParams.get('request_token');
+        }
+        
+        // Try parsing the entire URL/hash for request_token
+        if (!requestToken) {
+          const requestTokenMatch = redirectUrl.match(/request_token[=:]([^&?#\s]+)/i);
+          if (requestTokenMatch) {
+            requestToken = requestTokenMatch[1];
+          }
+        }
+      } catch (urlError) {
+        logger.error(`❌ Error parsing redirect URL: ${urlError.message}`);
+      }
+      
       if (!requestToken) {
-        throw new Error('Request token not found in redirect URL');
+        // Log full redirect URL for debugging
+        logger.error(`❌ Request token not found in redirect URL: ${redirectUrl}`);
+        logger.error(`🔍 URL breakdown - Protocol: ${redirectUrl.split('://')[0]}, Host: ${redirectUrl.split('/')[2]}, Path: ${redirectUrl.split('?')[0]}, Query: ${redirectUrl.split('?')[1] || 'none'}, Hash: ${redirectUrl.split('#')[1] || 'none'}`);
+        
+        // Check if we're still on the same page (maybe TOTP submission failed)
+        const currentPageText = await page.evaluate(() => document.body.innerText || '');
+        const stillOnTOTPPage = currentPageText.includes('TOTP') || 
+                               currentPageText.includes('Two-factor') || 
+                               currentPageText.includes('2FA');
+        
+        if (stillOnTOTPPage) {
+          // Check for error messages
+          const errorMessage = await page.evaluate(() => {
+            const errorElements = document.querySelectorAll('.error, .alert, [class*="error"], [class*="alert"]');
+            return Array.from(errorElements).map(el => el.textContent || el.innerText).join(' | ') || null;
+          });
+          
+          if (errorMessage) {
+            throw new Error(`TOTP submission failed: ${errorMessage}`);
+          } else {
+            throw new Error('TOTP submission may have failed - still on TOTP page and no request token found');
+          }
+        }
+        
+        throw new Error(`Request token not found in redirect URL. Full URL: ${redirectUrl}`);
       }
       
       logger.info(`✅ Request token extracted: ${requestToken.substring(0, 10)}...`);
