@@ -37,23 +37,79 @@ class TokenFetcher {
       // Step 2: Enter user ID and password
       logger.info('🔑 Entering credentials');
       await page.waitForSelector('#userid', { timeout: 10000 });
-      await page.type('#userid', kite_user_id);
-      await page.type('#password', password);
-      await page.click('button[type="submit"]');
+      await page.type('#userid', kite_user_id, { delay: 50 });
+      await page.type('#password', password, { delay: 50 });
       
-      // Wait for navigation to TOTP page after submitting credentials
-      logger.info('⏳ Waiting for page navigation after credential submission...');
-      try {
-        await page.waitForNavigation({ 
-          waitUntil: 'networkidle2', 
-          timeout: 15000 
+      // Find and click submit button (try multiple selectors)
+      const loginSubmitSelectors = [
+        'button[type="submit"]',
+        'button.submit',
+        'button.login',
+        'button[class*="submit"]',
+        'button[class*="login"]',
+        'form button[type="submit"]',
+        'button'
+      ];
+      
+      let submitClicked = false;
+      for (const submitSelector of loginSubmitSelectors) {
+        try {
+          const submitButton = await page.$(submitSelector);
+          if (submitButton) {
+            const buttonVisible = await page.evaluate((sel) => {
+              const btn = document.querySelector(sel);
+              return btn && btn.offsetParent !== null;
+            }, submitSelector);
+            
+            if (buttonVisible) {
+              logger.info(`✅ Clicking login submit button: ${submitSelector}`);
+              await Promise.all([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
+                page.click(submitSelector)
+              ]);
+              submitClicked = true;
+              break;
+            }
+          }
+        } catch (error) {
+          continue; // Try next selector
+        }
+      }
+      
+      if (!submitClicked) {
+        throw new Error('Could not find or click login submit button');
+      }
+      
+      // Wait for navigation and verify we're on TOTP page
+      logger.info('⏳ Waiting for TOTP page to load...');
+      await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for page to load
+      
+      // Verify we're on the TOTP page by checking URL or page content
+      const currentUrl = page.url();
+      const hasTOTPIndicators = await page.evaluate(() => {
+        const pageText = document.body.innerText || '';
+        return pageText.includes('TOTP') || 
+               pageText.includes('Two-factor') || 
+               pageText.includes('2FA') ||
+               document.querySelector('input[maxlength="6"]') !== null ||
+               document.querySelector('input[autocomplete="one-time-code"]') !== null;
+      });
+      
+      if (!hasTOTPIndicators && !currentUrl.includes('totp') && !currentUrl.includes('twofactor')) {
+        // Check for error messages
+        const errorMessage = await page.evaluate(() => {
+          const errorElements = document.querySelectorAll('.error, .alert, [class*="error"], [class*="alert"]');
+          return Array.from(errorElements).map(el => el.textContent || el.innerText).join(' | ') || null;
         });
-        logger.info('✅ Page navigated, now looking for TOTP field');
-      } catch (navError) {
-        logger.warn('⚠️ Navigation timeout, but continuing to look for TOTP field');
-        // Continue anyway - page might have loaded without navigation event
-        // Wait a bit for page to load using setTimeout wrapped in Promise
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        if (errorMessage) {
+          throw new Error(`Login failed: ${errorMessage}`);
+        }
+        
+        logger.warn(`⚠️ Page may not have navigated to TOTP page. URL: ${currentUrl}`);
+        // Continue anyway - might still be on TOTP page
+      } else {
+        logger.info('✅ TOTP page detected');
       }
       
       // Step 3: Handle TOTP
@@ -94,7 +150,10 @@ class TokenFetcher {
       // Try each selector with a shorter timeout per attempt
       for (const selector of totpSelectors) {
         try {
-          logger.info(`🔍 Trying TOTP selector: ${selector}`);
+          // Reduced logging to avoid rate limits
+          if (totpSelectors.indexOf(selector) < 5) {
+            logger.info(`🔍 Trying TOTP selector: ${selector}`);
+          }
           await page.waitForSelector(selector, { timeout: 5000 });
           
           // Verify the element is visible and enabled
@@ -113,10 +172,16 @@ class TokenFetcher {
             totpFieldFound = true;
             break;
           } else {
-            logger.warn(`⚠️ TOTP field found but not visible with selector: ${selector}`);
+            // Reduced logging to avoid rate limits
+            if (totpSelectors.indexOf(selector) < 5) {
+              logger.warn(`⚠️ TOTP field found but not visible with selector: ${selector}`);
+            }
           }
         } catch (error) {
-          logger.debug(`Selector ${selector} not found, trying next...`);
+          // Reduced logging - only log first few attempts
+          if (totpSelectors.indexOf(selector) < 3) {
+            logger.debug(`Selector ${selector} not found, trying next...`);
+          }
           continue;
         }
       }
