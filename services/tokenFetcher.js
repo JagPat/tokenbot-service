@@ -82,7 +82,45 @@ class TokenFetcher {
       
       // Wait for navigation and verify we're on TOTP page
       logger.info('⏳ Waiting for TOTP page to load...');
-      await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for page to load
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for dynamic content
+      
+      // Wait for TOTP input field to appear (it might be rendered dynamically)
+      logger.info('⏳ Waiting for TOTP input field to appear...');
+      let totpFieldAppeared = false;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between attempts
+        
+        const totpFieldExists = await page.evaluate(() => {
+          // Check for TOTP field in multiple ways
+          const inputs = Array.from(document.querySelectorAll('input'));
+          return inputs.some(inp => {
+            const hasLength = inp.maxLength === 6 || inp.maxLength === 8;
+            const hasPlaceholder = inp.placeholder && (
+              inp.placeholder.toLowerCase().includes('totp') ||
+              inp.placeholder.toLowerCase().includes('code') ||
+              inp.placeholder.toLowerCase().includes('two-factor') ||
+              inp.placeholder === '••••••'
+            );
+            const hasAutocomplete = inp.autocomplete === 'one-time-code';
+            const isNotUserid = inp.id !== 'userid' && inp.name !== 'userid';
+            const isNotPassword = inp.type !== 'password';
+            const isVisible = inp.offsetParent !== null;
+            
+            return isVisible && isNotUserid && isNotPassword && 
+                   (hasLength || hasPlaceholder || hasAutocomplete);
+          });
+        });
+        
+        if (totpFieldExists) {
+          totpFieldAppeared = true;
+          logger.info(`✅ TOTP field detected on attempt ${attempt + 1}`);
+          break;
+        }
+      }
+      
+      if (!totpFieldAppeared) {
+        logger.warn('⚠️ TOTP field not detected after waiting. Continuing to search...');
+      }
       
       // Verify we're on the TOTP page by checking URL or page content
       const currentUrl = page.url();
@@ -91,8 +129,8 @@ class TokenFetcher {
         return pageText.includes('TOTP') || 
                pageText.includes('Two-factor') || 
                pageText.includes('2FA') ||
-               document.querySelector('input[maxlength="6"]') !== null ||
-               document.querySelector('input[autocomplete="one-time-code"]') !== null;
+               pageText.includes('Enter code') ||
+               pageText.includes('authentication code');
       });
       
       if (!hasTOTPIndicators && !currentUrl.includes('totp') && !currentUrl.includes('twofactor')) {
@@ -123,26 +161,47 @@ class TokenFetcher {
       const totpPageUrl = page.url();
       logger.info(`🔗 Current page URL (TOTP page): ${totpPageUrl}`);
       
+      // Check if we're on TOTP page first to determine selector strategy
+      const isOnTOTPPage = await page.evaluate(() => {
+        const pageText = document.body.innerText || '';
+        return pageText.includes('TOTP') || 
+               pageText.includes('Two-factor') || 
+               pageText.includes('2FA') ||
+               pageText.includes('Enter code') ||
+               pageText.includes('authentication code');
+      });
+      
       // Try multiple selectors for TOTP field (Zerodha may use different selectors)
-      // Priority order: Most common Zerodha selectors first
-      const totpSelectors = [
-        'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete (most likely)
-        '#totp',                               // Original selector
-        'input[name="totp"]',                  // Name-based selector
-        'input[id="totp"]',                    // Explicit ID selector
-        '#totpcode',                           // Alternative ID
-        'input[placeholder*="TOTP"]',           // Placeholder-based (uppercase)
-        'input[placeholder*="Enter TOTP"]',      // Common Zerodha placeholder
-        'input[placeholder*="TOTP code"]',     // Alternative placeholder
-        'input[placeholder*="totp"]',           // Placeholder-based (lowercase)
-        'input[placeholder*="Totp"]',           // Placeholder-based (mixed case)
-        'input[type="text"][maxlength="6"]',  // TOTP is usually 6 digits
-        'input[type="text"][maxlength="8"]',  // Some use 8 digits
-        'input.totp',                         // Class-based
-        '.totp-input',                        // Alternative class
-        '[data-name="totp"]',                 // Data attribute selector
-        'input[autocomplete="off"][type="text"]' // Some forms disable autocomplete
-      ];
+      // Based on logs: TOTP field appears as type=number, maxLength=6, placeholder="••••••"
+      // CRITICAL: Zerodha reuses #userid for TOTP field on TOTP page!
+      let totpSelectors;
+      if (isOnTOTPPage) {
+        // On TOTP page: #userid IS the TOTP field (confirmed from logs)
+        totpSelectors = [
+          '#userid',                           // Zerodha reuses userid ID for TOTP field! (HIGHEST PRIORITY)
+          'input[placeholder*="••••••"]',       // Masked placeholder (from logs)
+          'input[type="number"][maxlength="6"]', // Number type with 6 digits (from logs)
+          'input[type="number"]',              // Any number type on TOTP page
+          'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete
+          'input[placeholder*="TOTP"]',         // Placeholder-based (uppercase)
+          'input[placeholder*="Enter TOTP"]',    // Common Zerodha placeholder
+          'input[placeholder*="code"]',        // Generic code placeholder
+          '#totp',                              // Original selector
+          'input[name="totp"]',                 // Name-based selector
+          '#totpcode'                           // Alternative ID
+        ];
+      } else {
+        // On login page: use standard selectors (exclude #userid)
+        totpSelectors = [
+          'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete
+          'input[placeholder*="TOTP"]',          // Placeholder-based (uppercase)
+          'input[placeholder*="Enter TOTP"]',    // Common Zerodha placeholder
+          'input[placeholder*="code"]',          // Generic code placeholder
+          '#totp',                               // Original selector
+          'input[name="totp"]',                  // Name-based selector
+          '#totpcode'                            // Alternative ID
+        ];
+      }
       
       let totpFieldFound = false;
       let usedSelector = null;
@@ -156,25 +215,48 @@ class TokenFetcher {
           }
           await page.waitForSelector(selector, { timeout: 5000 });
           
-          // Verify the element is visible and enabled
-          const isVisible = await page.evaluate((sel) => {
+          // Verify the element is visible and enabled, and check if it's actually a TOTP field
+          const fieldInfo = await page.evaluate((sel) => {
             const element = document.querySelector(sel);
-            return element && 
-                   element.offsetParent !== null && 
-                   !element.disabled &&
-                   element.offsetWidth > 0 &&
-                   element.offsetHeight > 0;
+            if (!element) return null;
+            
+            // Check page context - are we on TOTP page?
+            const pageText = document.body.innerText || '';
+            const isTOTPPage = pageText.includes('TOTP') || 
+                             pageText.includes('Two-factor') || 
+                             pageText.includes('2FA') ||
+                             pageText.includes('Enter code') ||
+                             pageText.includes('authentication code');
+            
+            // On TOTP page, a field with maxLength=6 and placeholder="••••••" is the TOTP field
+            // even if it has id="userid" (Zerodha might reuse the same ID)
+            const matchesTOTPCriteria = (element.maxLength === 6 || element.maxLength === 8) &&
+                                       (element.placeholder === '••••••' || 
+                                        (element.placeholder && element.placeholder.toLowerCase().includes('totp')) ||
+                                        element.autocomplete === 'one-time-code');
+            
+            return {
+              exists: true,
+              visible: element.offsetParent !== null,
+              enabled: !element.disabled,
+              hasSize: element.offsetWidth > 0 && element.offsetHeight > 0,
+              isTOTPPage: isTOTPPage,
+              matchesTOTPCriteria: matchesTOTPCriteria,
+              // Accept if: (1) matches TOTP criteria, OR (2) on TOTP page and has masked placeholder
+              acceptable: matchesTOTPCriteria || (isTOTPPage && element.placeholder === '••••••' && element.maxLength === 6)
+            };
           }, selector);
           
-          if (isVisible) {
-            logger.info(`✅ TOTP field found with selector: ${selector}`);
+          if (fieldInfo && fieldInfo.exists && fieldInfo.visible && fieldInfo.enabled && 
+              fieldInfo.hasSize && fieldInfo.acceptable) {
+            logger.info(`✅ TOTP field found with selector: ${selector} (on TOTP page: ${fieldInfo.isTOTPPage}, matches criteria: ${fieldInfo.matchesTOTPCriteria})`);
             usedSelector = selector;
             totpFieldFound = true;
             break;
           } else {
             // Reduced logging to avoid rate limits
-            if (totpSelectors.indexOf(selector) < 5) {
-              logger.warn(`⚠️ TOTP field found but not visible with selector: ${selector}`);
+            if (totpSelectors.indexOf(selector) < 5 && fieldInfo) {
+              logger.warn(`⚠️ Field found but not acceptable: ${selector} (visible: ${fieldInfo.visible}, acceptable: ${fieldInfo.acceptable}, criteria: ${fieldInfo.matchesTOTPCriteria})`);
             }
           }
         } catch (error) {
@@ -183,6 +265,51 @@ class TokenFetcher {
             logger.debug(`Selector ${selector} not found, trying next...`);
           }
           continue;
+        }
+      }
+      
+      // If still not found, try direct approach: find any input with masked placeholder on TOTP page
+      if (!totpFieldFound) {
+        logger.info('🔍 Trying direct field search by characteristics...');
+        const directField = await page.evaluate(() => {
+          const inputs = Array.from(document.querySelectorAll('input'));
+          const pageText = document.body.innerText || '';
+          const isTOTPPage = pageText.includes('TOTP') || 
+                           pageText.includes('Two-factor') || 
+                           pageText.includes('2FA') ||
+                           pageText.includes('Enter code');
+          
+          // Find input that matches TOTP characteristics
+          for (const inp of inputs) {
+            if (inp.offsetParent === null) continue; // Not visible
+            if (inp.disabled) continue;
+            if (inp.offsetWidth === 0 || inp.offsetHeight === 0) continue;
+            
+            // Check if it matches TOTP criteria
+            const hasMaskedPlaceholder = inp.placeholder === '••••••';
+            const hasCorrectLength = inp.maxLength === 6 || inp.maxLength === 8;
+            const hasTOTPAutocomplete = inp.autocomplete === 'one-time-code';
+            const isNumberType = inp.type === 'number';
+            
+            if (isTOTPPage && ((hasMaskedPlaceholder && hasCorrectLength) || hasTOTPAutocomplete || (hasMaskedPlaceholder && isNumberType))) {
+              return {
+                id: inp.id,
+                name: inp.name,
+                type: inp.type,
+                maxLength: inp.maxLength,
+                placeholder: inp.placeholder,
+                autocomplete: inp.autocomplete,
+                selector: inp.id ? `#${inp.id}` : inp.name ? `input[name="${inp.name}"]` : null
+              };
+            }
+          }
+          return null;
+        });
+        
+        if (directField && directField.selector) {
+          logger.info(`✅ TOTP field found via direct search: ${directField.selector}`);
+          usedSelector = directField.selector;
+          totpFieldFound = true;
         }
       }
       
