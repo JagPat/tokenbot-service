@@ -41,6 +41,20 @@ class TokenFetcher {
       await page.type('#password', password);
       await page.click('button[type="submit"]');
       
+      // Wait for navigation to TOTP page after submitting credentials
+      logger.info('⏳ Waiting for page navigation after credential submission...');
+      try {
+        await page.waitForNavigation({ 
+          waitUntil: 'networkidle2', 
+          timeout: 15000 
+        });
+        logger.info('✅ Page navigated, now looking for TOTP field');
+      } catch (navError) {
+        logger.warn('⚠️ Navigation timeout, but continuing to look for TOTP field');
+        // Continue anyway - page might have loaded without navigation event
+        await page.waitForTimeout(3000); // Wait a bit for page to load
+      }
+      
       // Step 3: Handle TOTP
       logger.info('🔐 Generating and entering TOTP');
       
@@ -48,20 +62,27 @@ class TokenFetcher {
       const totp = otplib.authenticator.generate(totp_secret);
       logger.info(`✅ TOTP generated: ${totp}`);
       
+      // Log current page URL for debugging
+      const currentUrl = page.url();
+      logger.info(`🔗 Current page URL: ${currentUrl}`);
+      
       // Try multiple selectors for TOTP field (Zerodha may use different selectors)
+      // Priority order: Most common Zerodha selectors first
       const totpSelectors = [
-        '#totp',                           // Original selector
-        'input[name="totp"]',             // Name-based selector
-        'input[id="totp"]',               // Explicit ID selector
-        '#totpcode',                       // Alternative ID
-        'input[placeholder*="TOTP"]',      // Placeholder-based (uppercase)
-        'input[placeholder*="totp"]',      // Placeholder-based (lowercase)
-        'input[placeholder*="Totp"]',      // Placeholder-based (mixed case)
-        'input[type="text"]',             // Generic text input (fallback - last resort)
-        '.totp-input',                     // Class-based selector
-        '[data-name="totp"]',              // Data attribute selector
-        'input.autocomplete',              // Common autocomplete class
-        'input[autocomplete="one-time-code"]' // Standard TOTP autocomplete
+        'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete (most likely)
+        '#totp',                               // Original selector
+        'input[name="totp"]',                  // Name-based selector
+        'input[id="totp"]',                    // Explicit ID selector
+        '#totpcode',                           // Alternative ID
+        'input[placeholder*="TOTP" i]',         // Placeholder-based (case-insensitive)
+        'input[placeholder*="Enter TOTP" i]', // Common Zerodha placeholder
+        'input[placeholder*="TOTP code" i]', // Alternative placeholder
+        'input[type="text"][maxlength="6"]',  // TOTP is usually 6 digits
+        'input[type="text"][maxlength="8"]',  // Some use 8 digits
+        'input.totp',                         // Class-based
+        '.totp-input',                        // Alternative class
+        '[data-name="totp"]',                 // Data attribute selector
+        'input[autocomplete="off"][type="text"]' // Some forms disable autocomplete
       ];
       
       let totpFieldFound = false;
@@ -106,15 +127,32 @@ class TokenFetcher {
           logger.warn('Failed to take screenshot:', screenshotError.message);
         }
         
-        // Log page HTML for debugging (first 2000 chars)
+        // Log page HTML for debugging (first 3000 chars and look for input fields)
         try {
           const pageHtml = await page.content();
-          logger.debug('Page HTML (first 2000 chars):', pageHtml.substring(0, 2000));
+          logger.error('📄 Page HTML (first 3000 chars):', pageHtml.substring(0, 3000));
+          
+          // Try to find all input fields on the page
+          const allInputs = await page.evaluate(() => {
+            const inputs = Array.from(document.querySelectorAll('input'));
+            return inputs.map(input => ({
+              id: input.id || null,
+              name: input.name || null,
+              type: input.type || null,
+              placeholder: input.placeholder || null,
+              autocomplete: input.autocomplete || null,
+              className: input.className || null,
+              maxLength: input.maxLength || null,
+              visible: input.offsetParent !== null
+            }));
+          });
+          
+          logger.error('📋 All input fields found on page:', JSON.stringify(allInputs, null, 2));
         } catch (htmlError) {
           logger.warn('Failed to get page HTML:', htmlError.message);
         }
         
-        throw new Error('TOTP input field not found. Zerodha login page structure may have changed. Please check the page and update selectors.');
+        throw new Error('TOTP input field not found. Zerodha login page structure may have changed. Please check the page and update selectors. Check screenshot and logs for page structure.');
       }
       
       // Type TOTP code into the field
