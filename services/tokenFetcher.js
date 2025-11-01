@@ -12,7 +12,7 @@ class TokenFetcher {
       logger.info(`🚀 Starting token fetch for user: ${kite_user_id}`);
       
       browser = await puppeteer.launch({
-        headless: true,
+        headless: 'new', // Use new headless mode (recommended by Puppeteer)
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
