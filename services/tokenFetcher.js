@@ -43,11 +43,118 @@ class TokenFetcher {
       
       // Step 3: Handle TOTP
       logger.info('🔐 Generating and entering TOTP');
-      await page.waitForSelector('#totp', { timeout: 10000 });
+      
+      // Generate TOTP code
       const totp = otplib.authenticator.generate(totp_secret);
       logger.info(`✅ TOTP generated: ${totp}`);
-      await page.type('#totp', totp);
-      await page.click('button[type="submit"]');
+      
+      // Try multiple selectors for TOTP field (Zerodha may use different selectors)
+      const totpSelectors = [
+        '#totp',                           // Original selector
+        'input[name="totp"]',             // Name-based selector
+        'input[id="totp"]',               // Explicit ID selector
+        '#totpcode',                       // Alternative ID
+        'input[placeholder*="TOTP" i]',   // Placeholder-based (case-insensitive)
+        'input[placeholder*="totp" i]',   // Lowercase placeholder
+        'input[type="text"]',             // Generic text input (fallback)
+        '.totp-input',                     // Class-based selector
+        '[data-name="totp"]'               // Data attribute selector
+      ];
+      
+      let totpFieldFound = false;
+      let usedSelector = null;
+      
+      // Try each selector with a shorter timeout per attempt
+      for (const selector of totpSelectors) {
+        try {
+          logger.info(`🔍 Trying TOTP selector: ${selector}`);
+          await page.waitForSelector(selector, { timeout: 5000 });
+          
+          // Verify the element is visible and enabled
+          const isVisible = await page.evaluate((sel) => {
+            const element = document.querySelector(sel);
+            return element && 
+                   element.offsetParent !== null && 
+                   !element.disabled &&
+                   element.offsetWidth > 0 &&
+                   element.offsetHeight > 0;
+          }, selector);
+          
+          if (isVisible) {
+            logger.info(`✅ TOTP field found with selector: ${selector}`);
+            usedSelector = selector;
+            totpFieldFound = true;
+            break;
+          } else {
+            logger.warn(`⚠️ TOTP field found but not visible with selector: ${selector}`);
+          }
+        } catch (error) {
+          logger.debug(`Selector ${selector} not found, trying next...`);
+          continue;
+        }
+      }
+      
+      if (!totpFieldFound) {
+        // Take screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/totp-page-screenshot.png', fullPage: true });
+          logger.error('📸 Screenshot saved to /tmp/totp-page-screenshot.png for debugging');
+        } catch (screenshotError) {
+          logger.warn('Failed to take screenshot:', screenshotError.message);
+        }
+        
+        // Log page HTML for debugging (first 2000 chars)
+        try {
+          const pageHtml = await page.content();
+          logger.debug('Page HTML (first 2000 chars):', pageHtml.substring(0, 2000));
+        } catch (htmlError) {
+          logger.warn('Failed to get page HTML:', htmlError.message);
+        }
+        
+        throw new Error('TOTP input field not found. Zerodha login page structure may have changed. Please check the page and update selectors.');
+      }
+      
+      // Type TOTP code into the field
+      logger.info(`📝 Entering TOTP code into field: ${usedSelector}`);
+      await page.type(usedSelector, totp, { delay: 100 }); // Add small delay for reliability
+      
+      // Find and click submit button (try multiple selectors)
+      const submitSelectors = [
+        'button[type="submit"]',
+        'button:contains("Login")',
+        'input[type="submit"]',
+        'button.submit',
+        'button.login',
+        'form button[type="button"]' // Some forms use button instead of submit
+      ];
+      
+      let submitButtonClicked = false;
+      for (const submitSelector of submitSelectors) {
+        try {
+          const submitButton = await page.$(submitSelector);
+          if (submitButton) {
+            const isVisible = await page.evaluate((sel) => {
+              const btn = document.querySelector(sel);
+              return btn && btn.offsetParent !== null;
+            }, submitSelector);
+            
+            if (isVisible) {
+              logger.info(`✅ Clicking submit button with selector: ${submitSelector}`);
+              await page.click(submitSelector);
+              submitButtonClicked = true;
+              break;
+            }
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+      
+      // Fallback: Press Enter if no submit button found
+      if (!submitButtonClicked) {
+        logger.warn('⚠️ Submit button not found, pressing Enter key');
+        await page.keyboard.press('Enter');
+      }
       
       // Step 4: Wait for redirect and extract request token
       logger.info('⏳ Waiting for authentication redirect');
