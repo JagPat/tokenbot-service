@@ -217,16 +217,46 @@ class TokenFetcher {
           
           logger.error(`📋 All input fields (${allInputs.length}): ${inputsSummary}`);
           
-          // Also log TOTP candidates (fields with maxLength 6 or 8)
-          const totpCandidates = allInputs.filter(inp => 
-            (inp.maxLength === 6 || inp.maxLength === 8) && inp.visible
-          );
+          // Also log TOTP candidates - better filtering
+          // Look for fields with: maxLength 6/8 AND visible AND (TOTP-related placeholder OR no placeholder)
+          const totpCandidates = allInputs.filter(inp => {
+            const hasTOTPLength = inp.maxLength === 6 || inp.maxLength === 8;
+            const isVisible = inp.visible;
+            const hasTOTPPlaceholder = inp.placeholder && (
+              inp.placeholder.toLowerCase().includes('totp') ||
+              inp.placeholder.toLowerCase().includes('two-factor') ||
+              inp.placeholder.toLowerCase().includes('2fa') ||
+              inp.placeholder.toLowerCase().includes('code') ||
+              inp.placeholder === '••••••' // Might be masked TOTP
+            );
+            const isNotUserid = inp.id !== 'userid' && inp.name !== 'userid';
+            const isNotPassword = inp.type !== 'password';
+            
+            return hasTOTPLength && isVisible && isNotUserid && isNotPassword && 
+                   (hasTOTPPlaceholder || !inp.placeholder || inp.autocomplete === 'one-time-code');
+          });
+          
           if (totpCandidates.length > 0) {
             logger.error(`🎯 TOTP field candidates: ${JSON.stringify(totpCandidates.map(inp => ({
               id: inp.id,
               name: inp.name,
+              type: inp.type,
               placeholder: inp.placeholder,
+              maxLength: inp.maxLength,
+              autocomplete: inp.autocomplete,
               selector: inp.id ? `#${inp.id}` : inp.name ? `input[name="${inp.name}"]` : null
+            })))}`);
+          } else {
+            // Log all visible inputs with maxLength 6/8 for debugging
+            const visibleInputs = allInputs.filter(inp => inp.visible);
+            const length6or8 = allInputs.filter(inp => (inp.maxLength === 6 || inp.maxLength === 8));
+            logger.error(`⚠️ No TOTP candidates found. Visible inputs: ${visibleInputs.length}, Length 6/8: ${length6or8.length}`);
+            logger.error(`🔍 All visible inputs: ${JSON.stringify(visibleInputs.map(inp => ({
+              id: inp.id,
+              name: inp.name,
+              type: inp.type,
+              maxLength: inp.maxLength,
+              placeholder: inp.placeholder
             })))}`);
           }
         } catch (htmlError) {
