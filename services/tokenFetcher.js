@@ -556,6 +556,7 @@ class TokenFetcher {
       logger.info(`🔗 Final redirect URL: ${redirectUrl}`);
       
       // Try to extract request_token from multiple locations (if not already extracted from interceptor)
+      // NOTE: requestToken variable is already declared above in the interceptor section
       if (!requestToken && redirectUrl) {
         try {
           // Try query parameter first (most common)
