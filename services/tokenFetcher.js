@@ -187,20 +187,15 @@ class TokenFetcher {
       }
       
       if (!totpFieldFound) {
-        // Take screenshot for debugging
+        // Take screenshot for debugging (silent - don't log)
         try {
           await page.screenshot({ path: '/tmp/totp-page-screenshot.png', fullPage: true });
-          logger.error('📸 Screenshot saved to /tmp/totp-page-screenshot.png for debugging');
         } catch (screenshotError) {
-          logger.warn('Failed to take screenshot:', screenshotError.message);
+          // Silent fail
         }
         
-        // Log page HTML for debugging (first 3000 chars and look for input fields)
+        // Try to find all input fields on the page (concise logging)
         try {
-          const pageHtml = await page.content();
-          logger.error('📄 Page HTML (first 3000 chars):', pageHtml.substring(0, 3000));
-          
-          // Try to find all input fields on the page
           const allInputs = await page.evaluate(() => {
             const inputs = Array.from(document.querySelectorAll('input'));
             return inputs.map(input => ({
@@ -215,7 +210,25 @@ class TokenFetcher {
             }));
           });
           
-          logger.error('📋 All input fields found on page:', JSON.stringify(allInputs, null, 2));
+          // Log in single compact line to avoid rate limits
+          const inputsSummary = allInputs.map(inp => 
+            `id:${inp.id||'null'},name:${inp.name||'null'},type:${inp.type},maxLength:${inp.maxLength||'null'},visible:${inp.visible},placeholder:${inp.placeholder||'null'}`
+          ).join(' | ');
+          
+          logger.error(`📋 All input fields (${allInputs.length}): ${inputsSummary}`);
+          
+          // Also log TOTP candidates (fields with maxLength 6 or 8)
+          const totpCandidates = allInputs.filter(inp => 
+            (inp.maxLength === 6 || inp.maxLength === 8) && inp.visible
+          );
+          if (totpCandidates.length > 0) {
+            logger.error(`🎯 TOTP field candidates: ${JSON.stringify(totpCandidates.map(inp => ({
+              id: inp.id,
+              name: inp.name,
+              placeholder: inp.placeholder,
+              selector: inp.id ? `#${inp.id}` : inp.name ? `input[name="${inp.name}"]` : null
+            })))}`);
+          }
         } catch (htmlError) {
           logger.warn('Failed to get page HTML:', htmlError.message);
         }
