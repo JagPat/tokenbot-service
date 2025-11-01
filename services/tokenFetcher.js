@@ -30,13 +30,17 @@ class TokenFetcher {
       // Step 1: Navigate to Kite OAuth login (not regular login page!)
       // CRITICAL: Use OAuth login URL to get request_token in callback URL
       // Regular login redirects to dashboard, but OAuth login redirects to callback URL with request_token
+      // IMPORTANT: The redirect URI must match EXACTLY what's configured in Zerodha developer console
       const redirectUri = process.env.ZERODHA_REDIRECT_URL || 
         'https://quantumtrade-backend.up.railway.app/api/modules/auth/broker/callback';
       
       // Generate OAuth login URL with API key (v=3 is the API version)
+      // NOTE: Zerodha uses the redirect_uri configured in developer console, not passed in URL
+      // But we can still use the OAuth login endpoint to trigger the OAuth flow
       const oauthLoginUrl = `https://kite.zerodha.com/connect/login?api_key=${api_key}&v=3`;
       logger.info(`📄 Navigating to Kite OAuth login: ${oauthLoginUrl}`);
-      logger.info(`📋 Redirect URI configured: ${redirectUri}`);
+      logger.info(`📋 Expected redirect URI: ${redirectUri}`);
+      logger.info(`⚠️ NOTE: Redirect URI must be configured in Zerodha developer console to match: ${redirectUri}`);
       
       await page.goto(oauthLoginUrl, { 
         waitUntil: 'networkidle2',
@@ -455,10 +459,53 @@ class TokenFetcher {
       }
       
       // Step 4: Wait for redirect and extract request token
+      // CRITICAL: We need to intercept the redirect from Zerodha BEFORE it hits the backend
+      // The backend callback will redirect to frontend if no OAuth session exists
+      // So we must extract request_token from the FIRST redirect URL from Zerodha
       logger.info('⏳ Waiting for authentication redirect');
       
-      // Wait for navigation - Zerodha will redirect to callback URL with request_token
       let redirectUrl = null;
+      let requestToken = null;
+      
+      // Set up response interceptor to capture the redirect URL with request_token
+      // This intercepts BEFORE the backend processes it and redirects to frontend
+      page.on('response', async (response) => {
+        const responseUrl = response.url();
+        logger.info(`🔍 Intercepted response: ${responseUrl}`);
+        
+        // Check if this is the callback URL with request_token
+        if (responseUrl.includes('/api/modules/auth/broker/callback') || 
+            responseUrl.includes('request_token')) {
+          logger.info(`🎯 Found callback URL in response: ${responseUrl}`);
+          
+          // Extract request_token from URL
+          try {
+            const urlObj = new URL(responseUrl);
+            let token = urlObj.searchParams.get('request_token');
+            
+            if (!token && urlObj.hash) {
+              const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+              token = hashParams.get('request_token');
+            }
+            
+            if (!token) {
+              const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
+              if (tokenMatch) {
+                token = tokenMatch[1];
+              }
+            }
+            
+            if (token) {
+              requestToken = token;
+              redirectUrl = responseUrl;
+              logger.info(`✅ Request token extracted from intercepted URL: ${token.substring(0, 10)}...`);
+            }
+          } catch (urlError) {
+            logger.warn(`⚠️ Error parsing intercepted URL: ${urlError.message}`);
+          }
+        }
+      });
+      
       try {
         // Wait for navigation event (redirect happens after TOTP submission)
         const navigationPromise = page.waitForNavigation({ 
@@ -467,57 +514,70 @@ class TokenFetcher {
         });
         
         await navigationPromise;
-        redirectUrl = page.url();
-        logger.info(`🔗 First redirect detected: ${redirectUrl}`);
+        const currentUrl = page.url();
+        logger.info(`🔗 Navigation completed, current URL: ${currentUrl}`);
+        
+        // If we already got request_token from response interceptor, use it
+        if (requestToken && redirectUrl) {
+          logger.info(`✅ Using request token from intercepted response: ${redirectUrl}`);
+        } else {
+          // Check current URL for request_token (might be in URL)
+          redirectUrl = currentUrl;
+          logger.info(`🔗 Checking current URL for request_token: ${redirectUrl}`);
+        }
         
         // Wait a bit more in case there's another redirect
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
         
         const finalUrl = page.url();
-        if (finalUrl !== redirectUrl) {
+        if (finalUrl !== redirectUrl && !requestToken) {
           logger.info(`🔗 Final redirect URL: ${finalUrl} (was: ${redirectUrl})`);
           redirectUrl = finalUrl;
         }
       } catch (navError) {
         logger.warn(`⚠️ Navigation timeout (${navError.message}), checking current URL anyway`);
-        redirectUrl = page.url();
-        logger.info(`🔗 Current URL (after timeout): ${redirectUrl}`);
+        if (!redirectUrl) {
+          redirectUrl = page.url();
+          logger.info(`🔗 Current URL (after timeout): ${redirectUrl}`);
+        }
         
         // Wait a bit more for any delayed redirects
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
         
-        const delayedUrl = page.url();
-        if (delayedUrl !== redirectUrl) {
-          logger.info(`🔗 Delayed redirect detected: ${delayedUrl} (was: ${redirectUrl})`);
-          redirectUrl = delayedUrl;
+        if (!requestToken) {
+          const delayedUrl = page.url();
+          if (delayedUrl !== redirectUrl) {
+            logger.info(`🔗 Delayed redirect detected: ${delayedUrl} (was: ${redirectUrl})`);
+            redirectUrl = delayedUrl;
+          }
         }
       }
       
       logger.info(`🔗 Final redirect URL: ${redirectUrl}`);
       
-      // Try to extract request_token from multiple locations
-      let requestToken = null;
-      
-      try {
-        // Try query parameter first (most common)
-        const urlObj = new URL(redirectUrl);
-        requestToken = urlObj.searchParams.get('request_token');
-        
-        // Try hash fragment if not in query params
-        if (!requestToken && urlObj.hash) {
-          const hashParams = new URLSearchParams(urlObj.hash.substring(1));
-          requestToken = hashParams.get('request_token');
-        }
-        
-        // Try parsing the entire URL/hash for request_token
-        if (!requestToken) {
-          const requestTokenMatch = redirectUrl.match(/request_token[=:]([^&?#\s]+)/i);
-          if (requestTokenMatch) {
-            requestToken = requestTokenMatch[1];
+      // Try to extract request_token from multiple locations (if not already extracted from interceptor)
+      if (!requestToken && redirectUrl) {
+        try {
+          // Try query parameter first (most common)
+          const urlObj = new URL(redirectUrl);
+          requestToken = urlObj.searchParams.get('request_token');
+          
+          // Try hash fragment if not in query params
+          if (!requestToken && urlObj.hash) {
+            const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+            requestToken = hashParams.get('request_token');
           }
+          
+          // Try parsing the entire URL/hash for request_token
+          if (!requestToken) {
+            const requestTokenMatch = redirectUrl.match(/request_token[=:]([^&?#\s]+)/i);
+            if (requestTokenMatch) {
+              requestToken = requestTokenMatch[1];
+            }
+          }
+        } catch (urlError) {
+          logger.error(`❌ Error parsing redirect URL: ${urlError.message}`);
         }
-      } catch (urlError) {
-        logger.error(`❌ Error parsing redirect URL: ${urlError.message}`);
       }
       
       if (!requestToken) {
