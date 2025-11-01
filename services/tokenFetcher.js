@@ -448,21 +448,43 @@ class TokenFetcher {
       // Step 4: Wait for redirect and extract request token
       logger.info('⏳ Waiting for authentication redirect');
       
-      // Wait for navigation with multiple strategies
+      // Wait for navigation - Zerodha will redirect to callback URL with request_token
+      let redirectUrl = null;
       try {
-        await Promise.race([
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
-          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 })
-        ]);
+        // Wait for navigation event (redirect happens after TOTP submission)
+        const navigationPromise = page.waitForNavigation({ 
+          waitUntil: 'networkidle2', 
+          timeout: 30000 
+        });
+        
+        await navigationPromise;
+        redirectUrl = page.url();
+        logger.info(`🔗 First redirect detected: ${redirectUrl}`);
+        
+        // Wait a bit more in case there's another redirect
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        const finalUrl = page.url();
+        if (finalUrl !== redirectUrl) {
+          logger.info(`🔗 Final redirect URL: ${finalUrl} (was: ${redirectUrl})`);
+          redirectUrl = finalUrl;
+        }
       } catch (navError) {
-        logger.warn('⚠️ Navigation timeout, checking current URL anyway');
+        logger.warn(`⚠️ Navigation timeout (${navError.message}), checking current URL anyway`);
+        redirectUrl = page.url();
+        logger.info(`🔗 Current URL (after timeout): ${redirectUrl}`);
+        
+        // Wait a bit more for any delayed redirects
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        const delayedUrl = page.url();
+        if (delayedUrl !== redirectUrl) {
+          logger.info(`🔗 Delayed redirect detected: ${delayedUrl} (was: ${redirectUrl})`);
+          redirectUrl = delayedUrl;
+        }
       }
       
-      // Wait a bit more for any client-side redirects
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const redirectUrl = page.url();
-      logger.info(`🔗 Redirected to: ${redirectUrl}`);
+      logger.info(`🔗 Final redirect URL: ${redirectUrl}`);
       
       // Try to extract request_token from multiple locations
       let requestToken = null;
