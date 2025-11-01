@@ -27,9 +27,18 @@ class TokenFetcher {
       const page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
       
-      // Step 1: Navigate to Kite login
-      logger.info('📄 Navigating to Kite login page');
-      await page.goto('https://kite.zerodha.com', { 
+      // Step 1: Navigate to Kite OAuth login (not regular login page!)
+      // CRITICAL: Use OAuth login URL to get request_token in callback URL
+      // Regular login redirects to dashboard, but OAuth login redirects to callback URL with request_token
+      const redirectUri = process.env.ZERODHA_REDIRECT_URL || 
+        'https://quantumtrade-backend.up.railway.app/api/modules/auth/broker/callback';
+      
+      // Generate OAuth login URL with API key (v=3 is the API version)
+      const oauthLoginUrl = `https://kite.zerodha.com/connect/login?api_key=${api_key}&v=3`;
+      logger.info(`📄 Navigating to Kite OAuth login: ${oauthLoginUrl}`);
+      logger.info(`📋 Redirect URI configured: ${redirectUri}`);
+      
+      await page.goto(oauthLoginUrl, { 
         waitUntil: 'networkidle2',
         timeout: 30000
       });
