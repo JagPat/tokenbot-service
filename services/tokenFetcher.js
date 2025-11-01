@@ -64,8 +64,8 @@ class TokenFetcher {
       logger.info(`✅ TOTP generated: ${totp}`);
       
       // Log current page URL for debugging
-      const currentUrl = page.url();
-      logger.info(`🔗 Current page URL: ${currentUrl}`);
+      const totpPageUrl = page.url();
+      logger.info(`🔗 Current page URL (TOTP page): ${totpPageUrl}`);
       
       // Try multiple selectors for TOTP field (Zerodha may use different selectors)
       // Priority order: Most common Zerodha selectors first
@@ -75,9 +75,11 @@ class TokenFetcher {
         'input[name="totp"]',                  // Name-based selector
         'input[id="totp"]',                    // Explicit ID selector
         '#totpcode',                           // Alternative ID
-        'input[placeholder*="TOTP" i]',         // Placeholder-based (case-insensitive)
-        'input[placeholder*="Enter TOTP" i]', // Common Zerodha placeholder
-        'input[placeholder*="TOTP code" i]', // Alternative placeholder
+        'input[placeholder*="TOTP"]',           // Placeholder-based (uppercase)
+        'input[placeholder*="Enter TOTP"]',      // Common Zerodha placeholder
+        'input[placeholder*="TOTP code"]',     // Alternative placeholder
+        'input[placeholder*="totp"]',           // Placeholder-based (lowercase)
+        'input[placeholder*="Totp"]',           // Placeholder-based (mixed case)
         'input[type="text"][maxlength="6"]',  // TOTP is usually 6 digits
         'input[type="text"][maxlength="8"]',  // Some use 8 digits
         'input.totp',                         // Class-based
