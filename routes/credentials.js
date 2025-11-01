@@ -7,11 +7,40 @@ const logger = require('../utils/logger');
 
 /**
  * POST /api/credentials
- * Save/update user credentials
+ * Save/update user credentials (supports both user and service authentication)
  */
-router.post('/', authenticateUser, async (req, res, next) => {
+router.post('/', async (req, res, next) => {
   try {
-    const { user_id } = req.user;
+    // Support both user authentication and service-to-service calls
+    let user_id = null;
+    
+    // Check if authenticated user (user endpoint)
+    if (req.user && req.user.user_id) {
+      user_id = req.user.user_id;
+      logger.info(`📝 User credential save requested for user: ${user_id}`);
+    } 
+    // Check if service-to-service call (backend endpoint)
+    else if (req.body.user_id || req.query.user_id) {
+      // Verify service API key for service-to-service calls
+      const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+      const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
+      
+      if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized service call'
+        });
+      }
+      
+      user_id = req.body.user_id || req.query.user_id;
+      logger.info(`📝 Service credential sync requested for user: ${user_id}`);
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing user_id or authentication'
+      });
+    }
+    
     const { kite_user_id, password, totp_secret, api_key, api_secret, auto_refresh_enabled } = req.body;
     
     logger.info(`📝 Saving credentials for user: ${user_id}`);
