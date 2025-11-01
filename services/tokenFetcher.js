@@ -52,7 +52,8 @@ class TokenFetcher {
       } catch (navError) {
         logger.warn('⚠️ Navigation timeout, but continuing to look for TOTP field');
         // Continue anyway - page might have loaded without navigation event
-        await page.waitForTimeout(3000); // Wait a bit for page to load
+        // Wait a bit for page to load using setTimeout wrapped in Promise
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
       
       // Step 3: Handle TOTP
