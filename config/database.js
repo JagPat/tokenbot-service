@@ -10,11 +10,32 @@ class Database {
     }
 
     try {
+      // Smart SSL configuration: only use SSL if DATABASE_URL explicitly requires it
+      // Check if connection string contains sslmode or if it's Railway internal URL
+      const connectionString = process.env.DATABASE_URL || '';
+      const isRailwayInternal = connectionString.includes('railway.internal');
+      const hasSSLMode = connectionString.includes('sslmode=');
+      
+      // Extract sslmode from connection string if present
+      let sslConfig = false;
+      if (hasSSLMode) {
+        const sslModeMatch = connectionString.match(/sslmode=([^&]+)/);
+        const sslMode = sslModeMatch ? sslModeMatch[1] : '';
+        if (sslMode === 'require' || sslMode === 'prefer') {
+          sslConfig = { rejectUnauthorized: false };
+        }
+      } else if (isRailwayInternal) {
+        // Railway internal URLs typically don't need SSL
+        sslConfig = false;
+      } else if (process.env.NODE_ENV === 'production' && !connectionString.includes('railway.internal')) {
+        // For external production connections, try SSL but allow fallback
+        // Set sslmode=prefer in connection string to enable this
+        sslConfig = false; // Disable SSL for now since new DB doesn't support it
+      }
+
       this.pool = new Pool({
         connectionString: process.env.DATABASE_URL,
-        ssl: process.env.NODE_ENV === 'production' ? {
-          rejectUnauthorized: false
-        } : false,
+        ssl: sslConfig,
         max: 20,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 2000,
