@@ -59,8 +59,13 @@ class TokenManager {
       return tokenData;
       
     } catch (error) {
-      // Log failure
-      await this.logAttempt(userId, attemptNumber || maxAttempts, 'failed', error.message, null);
+      // Log failure (but don't let logging errors break the error flow)
+      try {
+        await this.logAttempt(userId, attemptNumber || maxAttempts, 'failed', error.message, null);
+      } catch (logError) {
+        // Logging failed but don't mask the original error
+        logger.warn(`⚠️ Failed to log attempt (non-critical): ${logError.message}`);
+      }
       
       logger.error(`❌ Token generation failed for user ${userId}: ${error.message}`);
       throw error;
@@ -99,12 +104,33 @@ class TokenManager {
   
   async logAttempt(userId, attemptNumber, status, errorMessage, executionTime) {
     try {
+      // Check if user exists in kite_user_credentials before logging
+      // This prevents foreign key constraint violations
+      const userCheck = await db.query(
+        `SELECT user_id FROM kite_user_credentials WHERE user_id = $1`,
+        [userId]
+      );
+      
+      if (userCheck.rows.length === 0) {
+        // User doesn't exist in credentials table - log warning but don't fail
+        logger.warn(`⚠️ Cannot log attempt for user ${userId}: User not found in kite_user_credentials. Credentials must be stored first.`);
+        return;
+      }
+      
+      // User exists - safe to log
       await db.query(`
         INSERT INTO token_generation_logs (user_id, attempt_number, status, error_message, execution_time_ms)
         VALUES ($1, $2, $3, $4, $5)
       `, [userId, attemptNumber, status, errorMessage, executionTime]);
+      
+      logger.debug(`✅ Logged token generation attempt for user ${userId}: ${status}`);
     } catch (error) {
-      logger.error(`Failed to log attempt: ${error.message}`);
+      // Log error but don't throw - logging should never break token refresh
+      logger.error(`Failed to log attempt for user ${userId}: ${error.message}`, {
+        errorCode: error.code,
+        constraint: error.constraint,
+        userId
+      });
     }
   }
   
