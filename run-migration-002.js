@@ -4,11 +4,31 @@ const fs = require('fs');
 const path = require('path');
 
 async function runMigration() {
+  // Smart SSL configuration: only use SSL if DATABASE_URL explicitly requires it
+  // Use the same logic as config/database.js
+  const connectionString = process.env.DATABASE_URL || '';
+  const isRailwayInternal = connectionString.includes('railway.internal');
+  const hasSSLMode = connectionString.includes('sslmode=');
+  
+  // Extract sslmode from connection string if present
+  let sslConfig = false;
+  if (hasSSLMode) {
+    const sslModeMatch = connectionString.match(/sslmode=([^&]+)/);
+    const sslMode = sslModeMatch ? sslModeMatch[1] : '';
+    if (sslMode === 'require' || sslMode === 'prefer') {
+      sslConfig = { rejectUnauthorized: false };
+    }
+  } else if (isRailwayInternal) {
+    // Railway internal URLs typically don't need SSL
+    sslConfig = false;
+  } else if (process.env.NODE_ENV === 'production' && !connectionString.includes('railway.internal')) {
+    // For external production connections, disable SSL if not explicitly required
+    sslConfig = false;
+  }
+  
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? {
-      rejectUnauthorized: false
-    } : false,
+    ssl: sslConfig,
   });
 
   try {
