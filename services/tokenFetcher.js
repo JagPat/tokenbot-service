@@ -11,17 +11,38 @@ class TokenFetcher {
     try {
       logger.info(`🚀 Starting token fetch for user: ${kite_user_id}`);
       
+      // Determine Chromium executable path (Alpine Linux uses /usr/bin/chromium-browser)
+      const chromiumPaths = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        process.env.CHROME_BIN,
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable'
+      ].filter(Boolean); // Remove undefined values
+      
+      let executablePath = chromiumPaths[0] || undefined;
+      
       browser = await puppeteer.launch({
         headless: 'new', // Use new headless mode (recommended by Puppeteer)
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote', // Critical for containers - prevents process forking
+          '--single-process', // Critical for containers - runs in single process mode
           '--disable-gpu',
           '--disable-extensions',
-          '--disable-software-rasterizer'
+          '--disable-software-rasterizer',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding'
         ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+        executablePath: executablePath,
+        ignoreHTTPSErrors: true,
+        timeout: 60000 // Increased timeout for container environments
       });
       
       const page = await browser.newPage();

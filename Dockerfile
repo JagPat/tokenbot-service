@@ -19,7 +19,8 @@ RUN apk add --no-cache curl || \
 
 # Tell Puppeteer to skip downloading Chrome and use system Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    CHROME_BIN=/usr/bin/chromium-browser
 
 # Create app directory
 WORKDIR /app
