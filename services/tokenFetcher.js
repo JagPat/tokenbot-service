@@ -276,7 +276,7 @@ class TokenFetcher {
       }
       
       // Verify we're on the TOTP page by checking URL or page content
-      const currentUrl = page.url();
+      const preTotpUrl = page.url();
       const hasTOTPIndicators = await page.evaluate(() => {
         const pageText = document.body.innerText || '';
         return pageText.includes('TOTP') || 
@@ -286,7 +286,7 @@ class TokenFetcher {
                pageText.includes('authentication code');
       });
       
-      if (!hasTOTPIndicators && !currentUrl.includes('totp') && !currentUrl.includes('twofactor')) {
+      if (!hasTOTPIndicators && !preTotpUrl.includes('totp') && !preTotpUrl.includes('twofactor')) {
         // Check for error messages
         const errorMessage = await page.evaluate(() => {
           const errorElements = document.querySelectorAll('.error, .alert, [class*="error"], [class*="alert"]');
@@ -297,7 +297,7 @@ class TokenFetcher {
           throw new Error(`Login failed: ${errorMessage}`);
         }
         
-        logger.warn(`⚠️ Page may not have navigated to TOTP page. URL: ${currentUrl}`);
+        logger.warn(`⚠️ Page may not have navigated to TOTP page. URL: ${preTotpUrl}`);
         // Continue anyway - might still be on TOTP page
       } else {
         logger.info('✅ TOTP page detected');
