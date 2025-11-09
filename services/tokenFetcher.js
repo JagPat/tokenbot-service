@@ -177,7 +177,15 @@ class TokenFetcher {
       // Generate OAuth login URL with API key (v=3 is the API version)
       // NOTE: Zerodha uses the redirect_uri configured in developer console, not passed in URL
       // But we can still use the OAuth login endpoint to trigger the OAuth flow
-      const oauthLoginUrl = `https://kite.zerodha.com/connect/login?api_key=${api_key}&v=3`;
+      const sanitizedApiKey = (api_key || '').trim();
+      if (!sanitizedApiKey) {
+        throw new Error('Broker configuration is missing the Zerodha API key.');
+      }
+      if (sanitizedApiKey !== api_key) {
+        logger.warn(`⚠️ API key contained whitespace; sanitized before use (original length ${api_key.length}, sanitized length ${sanitizedApiKey.length})`);
+      }
+
+      const oauthLoginUrl = `https://kite.zerodha.com/connect/login?api_key=${encodeURIComponent(sanitizedApiKey)}&v=3`;
       logger.info(`📄 Navigating to Kite OAuth login: ${oauthLoginUrl}`);
       logger.info(`📋 Expected redirect URI: ${redirectUri}`);
       logger.info(`⚠️ NOTE: Redirect URI must be configured in Zerodha developer console to match: ${redirectUri}`);
@@ -195,6 +203,7 @@ class TokenFetcher {
           if (contentType.includes('application/json')) {
             const bodyText = await loginResponse.text();
             if (bodyText && bodyText.includes('Invalid `api_key`')) {
+              logger.error(`[ZerodhaOAuth] Login endpoint returned Invalid api_key JSON. Snippet: ${bodyText.slice(0, 200)}`);
               throw new Error('Zerodha rejected the provided API key while loading the OAuth login page. Please verify the API key in the broker configuration.');
             }
           }
@@ -246,6 +255,7 @@ class TokenFetcher {
       if (!loginUserSelector) {
         const loginPageContent = await page.content();
         if (loginPageContent.includes('Invalid `api_key`')) {
+          logger.error(`[ZerodhaOAuth] HTML page still indicates Invalid api_key. First 200 chars: ${loginPageContent.slice(0, 200)}`);
           throw new Error('Zerodha login page returned an API key error. Please confirm the API key and redirect URI are configured correctly in Zerodha developer console.');
         }
         throw new Error('User ID input field not found on Zerodha login page. The layout may have changed; manual review required.');
