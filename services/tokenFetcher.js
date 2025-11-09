@@ -182,15 +182,76 @@ class TokenFetcher {
       logger.info(`📋 Expected redirect URI: ${redirectUri}`);
       logger.info(`⚠️ NOTE: Redirect URI must be configured in Zerodha developer console to match: ${redirectUri}`);
       
-      await page.goto(oauthLoginUrl, { 
-        waitUntil: 'networkidle2',
+      const loginResponse = await page.goto(oauthLoginUrl, { 
+        waitUntil: 'domcontentloaded',
         timeout: 30000
       });
+
+      // Detect API errors returned as JSON (e.g., invalid api_key)
+      if (loginResponse) {
+        try {
+          const headers = loginResponse.headers();
+          const contentType = headers?.['content-type'] || headers?.['Content-Type'] || '';
+          if (contentType.includes('application/json')) {
+            const bodyText = await loginResponse.text();
+            if (bodyText && bodyText.includes('Invalid `api_key`')) {
+              throw new Error('Zerodha rejected the provided API key while loading the OAuth login page. Please verify the API key in the broker configuration.');
+            }
+          }
+        } catch (responseError) {
+          logger.warn(`⚠️ Unable to inspect Zerodha login response: ${responseError.message}`);
+        }
+      }
       
       // Step 2: Enter user ID and password
       logger.info('🔑 Entering credentials');
-      await page.waitForSelector('#userid', { timeout: 10000 });
-      await page.type('#userid', kite_user_id, { delay: 50 });
+      const loginUserSelectors = [
+        '#userid',
+        'input[name="user_id"]',
+        'input[name="userid"]',
+        'input[name="userId"]',
+        'input[id*="user"][type="text"]',
+        'input[placeholder*="User ID"]',
+        'input[placeholder*="user"]',
+        'input[aria-label*="User"]',
+        'input[data-testid*="user"]',
+        'input[type="text"]'
+      ];
+
+      let loginUserSelector = null;
+      for (const selector of loginUserSelectors) {
+        try {
+          await page.waitForSelector(selector, { timeout: 4000 });
+          const fieldInfo = await page.evaluate(sel => {
+            const element = document.querySelector(sel);
+            if (!element) return null;
+            return {
+              visible: element.offsetParent !== null,
+              enabled: !element.disabled,
+              tagName: element.tagName,
+              type: element.type || 'text'
+            };
+          }, selector);
+
+          if (fieldInfo?.visible && fieldInfo?.enabled) {
+            loginUserSelector = selector;
+            logger.info(`✅ Using login selector: ${selector}`);
+            break;
+          }
+        } catch (selectorError) {
+          continue;
+        }
+      }
+
+      if (!loginUserSelector) {
+        const loginPageContent = await page.content();
+        if (loginPageContent.includes('Invalid `api_key`')) {
+          throw new Error('Zerodha login page returned an API key error. Please confirm the API key and redirect URI are configured correctly in Zerodha developer console.');
+        }
+        throw new Error('User ID input field not found on Zerodha login page. The layout may have changed; manual review required.');
+      }
+
+      await page.type(loginUserSelector, kite_user_id, { delay: 50 });
       await page.type('#password', password, { delay: 50 });
       
       // Find and click submit button (try multiple selectors)
