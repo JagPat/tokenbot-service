@@ -25,6 +25,8 @@ class TokenFetcher {
       
       browser = await puppeteer.launch({
         headless: 'new', // Use new headless mode (recommended by Puppeteer)
+        protocolTimeout: 120000,
+        timeout: 90000,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -192,7 +194,7 @@ class TokenFetcher {
       
       const loginResponse = await page.goto(oauthLoginUrl, { 
         waitUntil: 'domcontentloaded',
-        timeout: 30000
+        timeout: 60000
       });
 
       // Detect API errors returned as JSON (e.g., invalid api_key)
