@@ -23,28 +23,54 @@ class TokenFetcher {
       
       let executablePath = chromiumPaths[0] || undefined;
       
+      // CRITICAL: Railway resource constraints require aggressive resource management
+      // The "Resource temporarily unavailable" error indicates process/file descriptor limits
       browser = await puppeteer.launch({
         headless: 'new', // Use new headless mode (recommended by Puppeteer)
         protocolTimeout: 120000,
         timeout: 90000,
         args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
+          '--no-sandbox', // CRITICAL: Required for Railway containers
+          '--disable-setuid-sandbox', // CRITICAL: Required for Railway containers
+          '--disable-dev-shm-usage', // Prevents /dev/shm issues
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
-          '--no-zygote', // Critical for containers - prevents process forking
-          '--single-process', // Critical for containers - runs in single process mode
+          '--no-zygote', // CRITICAL: Prevents process forking (saves resources)
+          '--single-process', // CRITICAL: Single process mode (saves memory)
           '--disable-gpu',
           '--disable-extensions',
           '--disable-software-rasterizer',
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding'
+          '--disable-renderer-backgrounding',
+          '--disable-features=TranslateUI', // Disable unnecessary features
+          '--disable-ipc-flooding-protection', // Reduce IPC overhead
+          '--disable-background-networking', // Reduce network overhead
+          '--disable-default-apps', // Reduce app overhead
+          '--disable-sync', // Disable sync features
+          '--metrics-recording-only', // Reduce metrics overhead
+          '--mute-audio', // Disable audio
+          '--no-default-browser-check', // Skip browser check
+          '--disable-component-extensions-with-background-pages', // Reduce extension overhead
+          '--disable-breakpad', // Disable crash reporting (saves resources)
+          '--disable-crash-reporter', // Disable crash reporter (saves resources)
+          '--disable-logging', // Reduce logging overhead
+          '--log-level=3', // Minimal logging
+          '--disable-features=VizDisplayCompositor' // Reduce compositor overhead
         ],
         executablePath: executablePath,
         ignoreHTTPSErrors: true,
-        timeout: 60000 // Increased timeout for container environments
+        timeout: 60000, // Increased timeout for container environments
+        // CRITICAL: Set process limits to prevent "Resource temporarily unavailable"
+        env: {
+          ...process.env,
+          // Reduce memory pressure
+          NODE_OPTIONS: '--max-old-space-size=512', // Limit Node.js memory
+          // Disable crashpad (causes the error)
+          CHROME_DEVEL_SANDBOX: '/usr/lib/chromium/chrome-sandbox',
+          // Force single process mode
+          PUPPETEER_DISABLE_CRASHPAD: '1'
+        }
       });
       
       const page = await browser.newPage();

@@ -1,16 +1,26 @@
 FROM node:18-alpine
 
 # Install system dependencies with proper error handling and cleanup
-# Split curl installation separately to handle network issues gracefully
+# CRITICAL: Install Chromium and all required dependencies for Railway
 RUN apk update && \
     apk add --no-cache \
     chromium \
+    chromium-chromedriver \
     nss \
     freetype \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
+    ttf-dejavu \
+    ttf-liberation \
+    font-noto \
+    libgcc \
+    libstdc++ \
     && rm -rf /var/cache/apk/*
+
+# CRITICAL: Set proper permissions for Chromium sandbox (prevents crashpad errors)
+RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
+    chmod 4755 /usr/lib/chromium/chromium-sandbox || true
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \
