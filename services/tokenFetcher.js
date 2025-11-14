@@ -39,7 +39,13 @@ class TokenFetcher {
       // CRITICAL: Railway resource constraints require aggressive resource management
       // The "Resource temporarily unavailable" error indicates process/file descriptor limits
       // SOLUTION: Completely disable crashpad handler and use minimal process model
-      browser = await puppeteer.launch({
+      
+      // Log launch configuration for debugging
+      logger.info(`🔧 Launching browser with executable: ${executablePath || 'default'}`);
+      logger.info(`🔧 Crashpad handler exists: ${fs.existsSync(crashpadHandlerPath)}`);
+      
+      try {
+        browser = await puppeteer.launch({
         headless: 'new', // Use new headless mode (recommended by Puppeteer)
         protocolTimeout: 120000,
         timeout: 90000,
@@ -97,10 +103,29 @@ class TokenFetcher {
         handleSIGTERM: false,
         handleSIGHUP: false
       });
+      } catch (launchError) {
+        // Enhanced error logging for browser launch failures
+        logger.error(`❌ Browser launch error details:`, {
+          message: launchError.message,
+          stack: launchError.stack,
+          executablePath: executablePath,
+          crashpadHandlerExists: fs.existsSync(crashpadHandlerPath),
+          crashpadHandlerPath: crashpadHandlerPath
+        });
+        
+        // Check if it's a resource limit issue
+        if (launchError.message?.includes('Resource temporarily unavailable') || 
+            launchError.message?.includes('ENOMEM') ||
+            launchError.message?.includes('Cannot allocate memory')) {
+          throw new Error('Browser launch failed due to insufficient resources. Railway container may need more memory/CPU allocated.');
+        }
+        
+        throw launchError;
+      }
       
       // Verify browser launched successfully
       if (!browser) {
-        throw new Error('Browser failed to launch');
+        throw new Error('Browser failed to launch - browser object is null');
       }
       
       logger.info(`✅ Browser launched successfully`);
