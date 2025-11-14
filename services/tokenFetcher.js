@@ -84,6 +84,13 @@ class TokenFetcher {
         handleSIGHUP: false
       });
       
+      // Verify browser launched successfully
+      if (!browser) {
+        throw new Error('Browser failed to launch');
+      }
+      
+      logger.info(`✅ Browser launched successfully`);
+      
       const page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
       
@@ -877,7 +884,17 @@ class TokenFetcher {
       };
       
     } catch (error) {
-      logger.error(`❌ Token fetch failed: ${error.message}`);
+      const isBrowserLaunchError = error.message?.includes('Failed to launch the browser process') ||
+                                   error.message?.includes('chrome_crashpad_handler') ||
+                                   error.message?.includes('Resource temporarily unavailable');
+      
+      if (isBrowserLaunchError) {
+        logger.error(`❌ Browser launch failed: ${error.message}`);
+        logger.warn(`💡 This is likely a resource limit issue. The crashpad handler has been disabled, but Railway may need more resources.`);
+      } else {
+        logger.error(`❌ Token fetch failed: ${error.message}`);
+      }
+      
       logger.error(error.stack);
       
       if (browser) {
