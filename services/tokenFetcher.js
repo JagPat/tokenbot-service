@@ -60,8 +60,7 @@ class TokenFetcher {
           '--disable-logging', // Reduce logging overhead
           '--log-level=3', // Minimal logging
           '--disable-features=VizDisplayCompositor', // Reduce compositor overhead
-          '--disable-features=Crashpad,CrashReporting', // CRITICAL: Disable crashpad feature
-          '--crashpad-handler-path=/dev/null' // Point crashpad handler to null device
+          '--disable-features=Crashpad,CrashReporting' // CRITICAL: Disable crashpad feature
         ],
         executablePath: executablePath,
         ignoreHTTPSErrors: true,

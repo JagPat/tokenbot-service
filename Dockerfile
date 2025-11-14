@@ -26,9 +26,9 @@ RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
     rm -f /usr/lib/chromium/chrome_crashpad_handler || true && \
     rm -f /usr/lib/chromium/chromium_crashpad_handler || true && \
     rm -f /usr/lib/chromium/*crashpad* || true && \
-    # Create a dummy crashpad handler that does nothing (prevents spawn errors)
-    touch /usr/lib/chromium/chrome_crashpad_handler && \
-    chmod 000 /usr/lib/chromium/chrome_crashpad_handler || true
+    # Create a dummy crashpad handler script that exits immediately (prevents spawn errors)
+    echo '#!/bin/sh\nexit 0' > /usr/lib/chromium/chrome_crashpad_handler && \
+    chmod 755 /usr/lib/chromium/chrome_crashpad_handler || true
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \
