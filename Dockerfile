@@ -19,8 +19,12 @@ RUN apk update && \
     && rm -rf /var/cache/apk/*
 
 # CRITICAL: Set proper permissions for Chromium sandbox (prevents crashpad errors)
+# Also remove crashpad handler to prevent "Resource temporarily unavailable" errors
 RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
-    chmod 4755 /usr/lib/chromium/chromium-sandbox || true
+    chmod 4755 /usr/lib/chromium/chromium-sandbox || true && \
+    # Remove crashpad handler to prevent spawn errors
+    rm -f /usr/lib/chromium/chrome_crashpad_handler || true && \
+    rm -f /usr/lib/chromium/chromium_crashpad_handler || true
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \

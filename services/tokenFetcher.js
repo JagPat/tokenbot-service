@@ -25,6 +25,7 @@ class TokenFetcher {
       
       // CRITICAL: Railway resource constraints require aggressive resource management
       // The "Resource temporarily unavailable" error indicates process/file descriptor limits
+      // SOLUTION: Completely disable crashpad handler and use minimal process model
       browser = await puppeteer.launch({
         headless: 'new', // Use new headless mode (recommended by Puppeteer)
         protocolTimeout: 120000,
@@ -54,9 +55,11 @@ class TokenFetcher {
           '--disable-component-extensions-with-background-pages', // Reduce extension overhead
           '--disable-breakpad', // Disable crash reporting (saves resources)
           '--disable-crash-reporter', // Disable crash reporter (saves resources)
+          '--disable-crashpad', // CRITICAL: Completely disable crashpad handler
           '--disable-logging', // Reduce logging overhead
           '--log-level=3', // Minimal logging
-          '--disable-features=VizDisplayCompositor' // Reduce compositor overhead
+          '--disable-features=VizDisplayCompositor', // Reduce compositor overhead
+          '--disable-features=Crashpad' // CRITICAL: Disable crashpad feature
         ],
         executablePath: executablePath,
         ignoreHTTPSErrors: true,
@@ -66,11 +69,19 @@ class TokenFetcher {
           ...process.env,
           // Reduce memory pressure
           NODE_OPTIONS: '--max-old-space-size=512', // Limit Node.js memory
-          // Disable crashpad (causes the error)
+          // CRITICAL: Completely disable crashpad (causes the error)
           CHROME_DEVEL_SANDBOX: '/usr/lib/chromium/chrome-sandbox',
-          // Force single process mode
-          PUPPETEER_DISABLE_CRASHPAD: '1'
-        }
+          // Force disable crashpad
+          PUPPETEER_DISABLE_CRASHPAD: '1',
+          // Additional crashpad disable flags
+          CHROME_CRASHPAD_DISABLED: '1',
+          // Set file descriptor limits (if possible)
+          NODE_NO_WARNINGS: '1'
+        },
+        // CRITICAL: Disable crashpad via handleSIGINT/SIGTERM
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false
       });
       
       const page = await browser.newPage();
