@@ -29,7 +29,9 @@ RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
     echo 'exit 0' >> /usr/lib/chromium/chrome_crashpad_handler && \
     chmod 755 /usr/lib/chromium/chrome_crashpad_handler && \
     # Also create chromium_crashpad_handler as fallback
-    cp /usr/lib/chromium/chrome_crashpad_handler /usr/lib/chromium/chromium_crashpad_handler 2>/dev/null || true
+    cp /usr/lib/chromium/chrome_crashpad_handler /usr/lib/chromium/chromium_crashpad_handler 2>/dev/null || true && \
+    # Verify Chromium installation
+    chromium-browser --version || chromium --version || echo "Warning: Chromium version check failed"
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \
