@@ -19,16 +19,17 @@ RUN apk update && \
     && rm -rf /var/cache/apk/*
 
 # CRITICAL: Set proper permissions for Chromium sandbox (prevents crashpad errors)
-# Also remove crashpad handler to prevent "Resource temporarily unavailable" errors
+# Also create dummy crashpad handler to prevent "No such file or directory" errors
 RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
     chmod 4755 /usr/lib/chromium/chromium-sandbox || true && \
-    # Remove crashpad handler to prevent spawn errors (try multiple locations)
-    rm -f /usr/lib/chromium/chrome_crashpad_handler || true && \
-    rm -f /usr/lib/chromium/chromium_crashpad_handler || true && \
-    rm -f /usr/lib/chromium/*crashpad* || true && \
-    # Create a dummy crashpad handler script that exits immediately (prevents spawn errors)
-    echo '#!/bin/sh\nexit 0' > /usr/lib/chromium/chrome_crashpad_handler && \
-    chmod 755 /usr/lib/chromium/chrome_crashpad_handler || true
+    # CRITICAL: Create dummy crashpad handler BEFORE removing original (if it exists)
+    # Chromium requires this file to exist, so we create a no-op script
+    mkdir -p /usr/lib/chromium && \
+    echo '#!/bin/sh' > /usr/lib/chromium/chrome_crashpad_handler && \
+    echo 'exit 0' >> /usr/lib/chromium/chrome_crashpad_handler && \
+    chmod 755 /usr/lib/chromium/chrome_crashpad_handler && \
+    # Also create chromium_crashpad_handler as fallback
+    cp /usr/lib/chromium/chrome_crashpad_handler /usr/lib/chromium/chromium_crashpad_handler 2>/dev/null || true
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \

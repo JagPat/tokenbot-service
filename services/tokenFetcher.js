@@ -23,6 +23,19 @@ class TokenFetcher {
       
       let executablePath = chromiumPaths[0] || undefined;
       
+      // CRITICAL: Ensure crashpad handler exists before launching browser
+      // Chromium requires this file to exist, even if it's just a dummy script
+      const crashpadHandlerPath = '/usr/lib/chromium/chrome_crashpad_handler';
+      const fs = require('fs');
+      try {
+        if (!fs.existsSync(crashpadHandlerPath)) {
+          logger.warn(`⚠️ Crashpad handler not found at ${crashpadHandlerPath}, creating dummy script...`);
+          fs.writeFileSync(crashpadHandlerPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        }
+      } catch (fsError) {
+        logger.warn(`⚠️ Could not create crashpad handler: ${fsError.message}`);
+      }
+      
       // CRITICAL: Railway resource constraints require aggressive resource management
       // The "Resource temporarily unavailable" error indicates process/file descriptor limits
       // SOLUTION: Completely disable crashpad handler and use minimal process model
