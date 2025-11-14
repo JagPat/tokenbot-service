@@ -22,9 +22,13 @@ RUN apk update && \
 # Also remove crashpad handler to prevent "Resource temporarily unavailable" errors
 RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
     chmod 4755 /usr/lib/chromium/chromium-sandbox || true && \
-    # Remove crashpad handler to prevent spawn errors
+    # Remove crashpad handler to prevent spawn errors (try multiple locations)
     rm -f /usr/lib/chromium/chrome_crashpad_handler || true && \
-    rm -f /usr/lib/chromium/chromium_crashpad_handler || true
+    rm -f /usr/lib/chromium/chromium_crashpad_handler || true && \
+    rm -f /usr/lib/chromium/*crashpad* || true && \
+    # Create a dummy crashpad handler that does nothing (prevents spawn errors)
+    touch /usr/lib/chromium/chrome_crashpad_handler && \
+    chmod 000 /usr/lib/chromium/chrome_crashpad_handler || true
 
 # Install curl separately with retry logic for network resilience
 RUN apk add --no-cache curl || \

@@ -56,10 +56,12 @@ class TokenFetcher {
           '--disable-breakpad', // Disable crash reporting (saves resources)
           '--disable-crash-reporter', // Disable crash reporter (saves resources)
           '--disable-crashpad', // CRITICAL: Completely disable crashpad handler
+          '--disable-in-process-stack-traces', // Disable stack traces (reduces crashpad usage)
           '--disable-logging', // Reduce logging overhead
           '--log-level=3', // Minimal logging
           '--disable-features=VizDisplayCompositor', // Reduce compositor overhead
-          '--disable-features=Crashpad' // CRITICAL: Disable crashpad feature
+          '--disable-features=Crashpad,CrashReporting', // CRITICAL: Disable crashpad feature
+          '--crashpad-handler-path=/dev/null' // Point crashpad handler to null device
         ],
         executablePath: executablePath,
         ignoreHTTPSErrors: true,
