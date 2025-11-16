@@ -1,136 +1,34 @@
-const puppeteer = require('puppeteer');
 const otplib = require('otplib');
 const KiteConnect = require('kiteconnect').KiteConnect;
 const logger = require('../utils/logger');
+const browserPool = require('./browserPool');
 
 class TokenFetcher {
   async fetchAccessToken({ kite_user_id, password, totp_secret, api_key, api_secret }) {
     const startTime = Date.now();
+    let browserInfo = null;
     let browser = null;
     
     try {
       logger.info(`🚀 Starting token fetch for user: ${kite_user_id}`);
       
-      // Determine Chromium executable path (Alpine Linux uses /usr/bin/chromium-browser)
-      const chromiumPaths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        process.env.CHROME_BIN,
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable'
-      ].filter(Boolean); // Remove undefined values
-      
-      let executablePath = chromiumPaths[0] || undefined;
-      
-      // CRITICAL: Ensure crashpad handler exists before launching browser
-      // Chromium requires this file to exist, even if it's just a dummy script
-      const crashpadHandlerPath = '/usr/lib/chromium/chrome_crashpad_handler';
-      const fs = require('fs');
+      // 🔥 BROWSER POOL: Acquire browser from pool instead of launching new instance
       try {
-        if (!fs.existsSync(crashpadHandlerPath)) {
-          logger.warn(`⚠️ Crashpad handler not found at ${crashpadHandlerPath}, creating dummy script...`);
-          fs.writeFileSync(crashpadHandlerPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-        }
-      } catch (fsError) {
-        logger.warn(`⚠️ Could not create crashpad handler: ${fsError.message}`);
+        browserInfo = await browserPool.acquire();
+        browser = browserInfo.browser;
+        logger.info(`✅ Browser acquired from pool: ${browserInfo.id}`);
+      } catch (poolError) {
+        logger.error(`❌ Failed to acquire browser from pool: ${poolError.message}`);
+        throw new Error(`Browser unavailable: ${poolError.message}`);
       }
       
-      // CRITICAL: Railway resource constraints require aggressive resource management
-      // The "Resource temporarily unavailable" error indicates process/file descriptor limits
-      // SOLUTION: Completely disable crashpad handler and use minimal process model
-      
-      // Log launch configuration for debugging
-      logger.info(`🔧 Launching browser with executable: ${executablePath || 'default'}`);
-      logger.info(`🔧 Crashpad handler exists: ${fs.existsSync(crashpadHandlerPath)}`);
-      
-      try {
-        browser = await puppeteer.launch({
-        headless: 'new', // Use new headless mode (recommended by Puppeteer)
-        protocolTimeout: 120000,
-        timeout: 90000,
-        args: [
-          '--no-sandbox', // CRITICAL: Required for Railway containers
-          '--disable-setuid-sandbox', // CRITICAL: Required for Railway containers
-          '--disable-dev-shm-usage', // Prevents /dev/shm issues
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote', // CRITICAL: Prevents process forking (saves resources)
-          '--single-process', // CRITICAL: Single process mode (saves memory)
-          '--disable-gpu',
-          '--disable-extensions',
-          '--disable-software-rasterizer',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-features=TranslateUI', // Disable unnecessary features
-          '--disable-ipc-flooding-protection', // Reduce IPC overhead
-          '--disable-background-networking', // Reduce network overhead
-          '--disable-default-apps', // Reduce app overhead
-          '--disable-sync', // Disable sync features
-          '--metrics-recording-only', // Reduce metrics overhead
-          '--mute-audio', // Disable audio
-          '--no-default-browser-check', // Skip browser check
-          '--disable-component-extensions-with-background-pages', // Reduce extension overhead
-          '--disable-breakpad', // Disable crash reporting (saves resources)
-          '--disable-crash-reporter', // Disable crash reporter (saves resources)
-          '--disable-crashpad', // CRITICAL: Completely disable crashpad handler
-          '--disable-in-process-stack-traces', // Disable stack traces (reduces crashpad usage)
-          '--disable-logging', // Reduce logging overhead
-          '--log-level=3', // Minimal logging
-          '--disable-features=VizDisplayCompositor', // Reduce compositor overhead
-          '--disable-features=Crashpad,CrashReporting' // CRITICAL: Disable crashpad feature
-        ],
-        executablePath: executablePath,
-        ignoreHTTPSErrors: true,
-        timeout: 60000, // Increased timeout for container environments
-        // CRITICAL: Set process limits to prevent "Resource temporarily unavailable"
-        env: {
-          ...process.env,
-          // Reduce memory pressure
-          NODE_OPTIONS: '--max-old-space-size=512', // Limit Node.js memory
-          // CRITICAL: Completely disable crashpad (causes the error)
-          CHROME_DEVEL_SANDBOX: '/usr/lib/chromium/chrome-sandbox',
-          // Force disable crashpad
-          PUPPETEER_DISABLE_CRASHPAD: '1',
-          // Additional crashpad disable flags
-          CHROME_CRASHPAD_DISABLED: '1',
-          // Set file descriptor limits (if possible)
-          NODE_NO_WARNINGS: '1'
-        },
-        // CRITICAL: Disable crashpad via handleSIGINT/SIGTERM
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false
-      });
-      } catch (launchError) {
-        // Enhanced error logging for browser launch failures
-        logger.error(`❌ Browser launch error details:`, {
-          message: launchError.message,
-          stack: launchError.stack,
-          executablePath: executablePath,
-          crashpadHandlerExists: fs.existsSync(crashpadHandlerPath),
-          crashpadHandlerPath: crashpadHandlerPath
-        });
-        
-        // Check if it's a resource limit issue
-        if (launchError.message?.includes('Resource temporarily unavailable') || 
-            launchError.message?.includes('ENOMEM') ||
-            launchError.message?.includes('Cannot allocate memory')) {
-          throw new Error('Browser launch failed due to insufficient resources. Railway container may need more memory/CPU allocated.');
-        }
-        
-        throw launchError;
+      // Verify browser is connected
+      if (!browser || !browser.isConnected()) {
+        throw new Error('Browser is not connected');
       }
       
-      // Verify browser launched successfully
-      if (!browser) {
-        throw new Error('Browser failed to launch - browser object is null');
-      }
-      
-      logger.info(`✅ Browser launched successfully`);
-      
-      const page = await browser.newPage();
+      let page = null;
+      page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
       
       // CRITICAL: Set up response and request interceptors EARLY to capture callback URL
@@ -903,8 +801,9 @@ class TokenFetcher {
       
       logger.info(`✅ Request token extracted: ${requestToken.substring(0, 10)}...`);
       
-      await browser.close();
-      browser = null;
+      // Close page but keep browser in pool
+      await page.close();
+      page = null;
       
       // Step 5: Generate session using KiteConnect
       logger.info('🔄 Generating session with KiteConnect API');
@@ -913,6 +812,12 @@ class TokenFetcher {
       
       const executionTime = Date.now() - startTime;
       logger.info(`✅ Token generation successful in ${executionTime}ms`);
+      
+      // Release browser back to pool before returning
+      if (browserInfo) {
+        browserPool.release(browserInfo.id);
+        logger.info(`🔄 Released browser ${browserInfo.id} back to pool`);
+      }
       
       return {
         access_token: session.access_token,
@@ -923,24 +828,25 @@ class TokenFetcher {
       };
       
     } catch (error) {
-      const isBrowserLaunchError = error.message?.includes('Failed to launch the browser process') ||
-                                   error.message?.includes('chrome_crashpad_handler') ||
-                                   error.message?.includes('Resource temporarily unavailable');
-      
-      if (isBrowserLaunchError) {
-        logger.error(`❌ Browser launch failed: ${error.message}`);
-        logger.warn(`💡 This is likely a resource limit issue. The crashpad handler has been disabled, but Railway may need more resources.`);
-      } else {
-        logger.error(`❌ Token fetch failed: ${error.message}`);
-      }
-      
+      logger.error(`❌ Token fetch failed: ${error.message}`);
       logger.error(error.stack);
       
-      if (browser) {
+      // Cleanup: close page if it exists
+      if (page) {
         try {
-          await browser.close();
+          await page.close();
         } catch (closeError) {
-          logger.error('Failed to close browser:', closeError);
+          logger.warn(`Failed to close page: ${closeError.message}`);
+        }
+      }
+      
+      // 🔥 BROWSER POOL: Release browser back to pool (don't close it)
+      if (browserInfo) {
+        try {
+          browserPool.release(browserInfo.id);
+          logger.info(`🔄 Released browser ${browserInfo.id} back to pool`);
+        } catch (releaseError) {
+          logger.warn(`Failed to release browser: ${releaseError.message}`);
         }
       }
       

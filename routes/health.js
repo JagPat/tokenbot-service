@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const logger = require('../utils/logger');
+const browserPool = require('../services/browserPool');
 
 /**
  * GET /health
@@ -48,7 +49,8 @@ router.get('/', async (req, res) => {
     memory: {
       used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
       total_mb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
-    }
+    },
+    browser_pool: browserPool.getStats()
   });
 });
 
