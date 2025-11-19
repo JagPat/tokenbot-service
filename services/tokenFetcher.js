@@ -25,8 +25,8 @@ class TokenFetcher {
       // Verify browser is connected
       if (!browser || !browser.isConnected()) {
         throw new Error('Browser is not connected');
-      }
-      
+        }
+        
       let page = null;
       page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -828,7 +828,7 @@ class TokenFetcher {
       };
       
     } catch (error) {
-      logger.error(`❌ Token fetch failed: ${error.message}`);
+        logger.error(`❌ Token fetch failed: ${error.message}`);
       logger.error(error.stack);
       
       // Cleanup: close page if it exists
