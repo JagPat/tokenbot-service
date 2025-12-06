@@ -8,10 +8,11 @@ class TokenFetcher {
     const startTime = Date.now();
     let browserInfo = null;
     let browser = null;
-    
+    let page = null;
+
     try {
       logger.info(`🚀 Starting token fetch for user: ${kite_user_id}`);
-      
+
       // 🔥 BROWSER POOL: Acquire browser from pool instead of launching new instance
       try {
         browserInfo = await browserPool.acquire();
@@ -21,45 +22,44 @@ class TokenFetcher {
         logger.error(`❌ Failed to acquire browser from pool: ${poolError.message}`);
         throw new Error(`Browser unavailable: ${poolError.message}`);
       }
-      
+
       // Verify browser is connected
       if (!browser || !browser.isConnected()) {
         throw new Error('Browser is not connected');
-        }
-        
-      let page = null;
+      }
+
       page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-      
+
       // CRITICAL: Set up response and request interceptors EARLY to capture callback URL
       // Must be set up BEFORE any navigation starts
       let interceptedRequestToken = null;
       let interceptedCallbackUrl = null;
-      
+
       // Intercept requests to catch redirect to callback URL (BEFORE backend processes it)
       page.on('request', (request) => {
         const requestUrl = request.url();
         // Only log callback-related requests (reduced logging)
         if (requestUrl.includes('/api/modules/auth/broker/callback') && requestUrl.includes('request_token')) {
           logger.info(`🎯 Intercepted callback REQUEST: ${requestUrl}`);
-          
+
           // Extract request_token from request URL
           try {
             const urlObj = new URL(requestUrl);
             let token = urlObj.searchParams.get('request_token');
-            
+
             if (!token && urlObj.hash) {
               const hashParams = new URLSearchParams(urlObj.hash.substring(1));
               token = hashParams.get('request_token');
             }
-            
+
             if (!token) {
               const tokenMatch = requestUrl.match(/request_token[=:]([^&?#\s]+)/i);
               if (tokenMatch) {
                 token = tokenMatch[1];
               }
             }
-            
+
             if (token) {
               interceptedRequestToken = token;
               interceptedCallbackUrl = requestUrl;
@@ -70,33 +70,33 @@ class TokenFetcher {
           }
         }
       });
-      
+
       // Intercept responses to catch callback URL (captures both GET redirects and POST responses)
       page.on('response', async (response) => {
         const responseUrl = response.url();
         const status = response.status();
-        
+
         // Check if this is the callback URL (even without request_token in URL - might be in response body)
         if (responseUrl.includes('/api/modules/auth/broker/callback')) {
           logger.info(`🎯 Intercepted callback RESPONSE: ${responseUrl} (Status: ${status})`);
-          
+
           // Extract request_token from response URL
           try {
             const urlObj = new URL(responseUrl);
             let token = urlObj.searchParams.get('request_token');
-            
+
             if (!token && urlObj.hash) {
               const hashParams = new URLSearchParams(urlObj.hash.substring(1));
               token = hashParams.get('request_token');
             }
-            
+
             if (!token) {
               const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
               if (tokenMatch) {
                 token = tokenMatch[1];
               }
             }
-            
+
             // If not in URL, try response body (for POST requests)
             if (!token && status === 200) {
               try {
@@ -110,7 +110,7 @@ class TokenFetcher {
                 // Ignore - response might not be text
               }
             }
-            
+
             if (token && !interceptedRequestToken) {
               interceptedRequestToken = token;
               interceptedCallbackUrl = responseUrl;
@@ -122,23 +122,23 @@ class TokenFetcher {
         } else if (responseUrl.includes('request_token')) {
           // Also catch any URL with request_token (even if not callback path)
           logger.info(`🎯 Intercepted URL with request_token: ${responseUrl}`);
-          
+
           try {
             const urlObj = new URL(responseUrl);
             let token = urlObj.searchParams.get('request_token');
-            
+
             if (!token && urlObj.hash) {
               const hashParams = new URLSearchParams(urlObj.hash.substring(1));
               token = hashParams.get('request_token');
             }
-            
+
             if (!token) {
               const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
               if (tokenMatch) {
                 token = tokenMatch[1];
               }
             }
-            
+
             if (token && !interceptedRequestToken) {
               interceptedRequestToken = token;
               interceptedCallbackUrl = responseUrl;
@@ -149,14 +149,14 @@ class TokenFetcher {
           }
         }
       });
-      
+
       // Step 1: Navigate to Kite OAuth login (not regular login page!)
       // CRITICAL: Use OAuth login URL to get request_token in callback URL
       // Regular login redirects to dashboard, but OAuth login redirects to callback URL with request_token
       // IMPORTANT: The redirect URI must match EXACTLY what's configured in Zerodha developer console
-      const redirectUri = process.env.ZERODHA_REDIRECT_URL || 
+      const redirectUri = process.env.ZERODHA_REDIRECT_URL ||
         'https://quantumtrade-backend.up.railway.app/api/modules/auth/broker/callback';
-      
+
       // Generate OAuth login URL with API key (v=3 is the API version)
       // NOTE: Zerodha uses the redirect_uri configured in developer console, not passed in URL
       // But we can still use the OAuth login endpoint to trigger the OAuth flow
@@ -172,8 +172,8 @@ class TokenFetcher {
       logger.info(`📄 Navigating to Kite OAuth login: ${oauthLoginUrl}`);
       logger.info(`📋 Expected redirect URI: ${redirectUri}`);
       logger.info(`⚠️ NOTE: Redirect URI must be configured in Zerodha developer console to match: ${redirectUri}`);
-      
-      const loginResponse = await page.goto(oauthLoginUrl, { 
+
+      const loginResponse = await page.goto(oauthLoginUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 60000
       });
@@ -194,7 +194,7 @@ class TokenFetcher {
           logger.warn(`⚠️ Unable to inspect Zerodha login response: ${responseError.message}`);
         }
       }
-      
+
       // Step 2: Enter user ID and password
       logger.info('🔑 Entering credentials');
       const loginUserSelectors = [
@@ -246,7 +246,7 @@ class TokenFetcher {
 
       await page.type(loginUserSelector, kite_user_id, { delay: 50 });
       await page.type('#password', password, { delay: 50 });
-      
+
       // Find and click submit button (try multiple selectors)
       const loginSubmitSelectors = [
         'button[type="submit"]',
@@ -257,7 +257,7 @@ class TokenFetcher {
         'form button[type="submit"]',
         'button'
       ];
-      
+
       let submitClicked = false;
       for (const submitSelector of loginSubmitSelectors) {
         try {
@@ -267,11 +267,11 @@ class TokenFetcher {
               const btn = document.querySelector(sel);
               return btn && btn.offsetParent !== null;
             }, submitSelector);
-            
+
             if (buttonVisible) {
               logger.info(`✅ Clicking login submit button: ${submitSelector}`);
               await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => { }),
                 page.click(submitSelector)
               ]);
               submitClicked = true;
@@ -282,21 +282,21 @@ class TokenFetcher {
           continue; // Try next selector
         }
       }
-      
+
       if (!submitClicked) {
         throw new Error('Could not find or click login submit button');
       }
-      
+
       // Wait for navigation and verify we're on TOTP page
       logger.info('⏳ Waiting for TOTP page to load...');
       await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for dynamic content
-      
+
       // Wait for TOTP input field to appear (it might be rendered dynamically)
       logger.info('⏳ Waiting for TOTP input field to appear...');
       let totpFieldAppeared = false;
       for (let attempt = 0; attempt < 10; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between attempts
-        
+
         const totpFieldExists = await page.evaluate(() => {
           // Check for TOTP field in multiple ways
           const inputs = Array.from(document.querySelectorAll('input'));
@@ -312,72 +312,72 @@ class TokenFetcher {
             const isNotUserid = inp.id !== 'userid' && inp.name !== 'userid';
             const isNotPassword = inp.type !== 'password';
             const isVisible = inp.offsetParent !== null;
-            
-            return isVisible && isNotUserid && isNotPassword && 
-                   (hasLength || hasPlaceholder || hasAutocomplete);
+
+            return isVisible && isNotUserid && isNotPassword &&
+              (hasLength || hasPlaceholder || hasAutocomplete);
           });
         });
-        
+
         if (totpFieldExists) {
           totpFieldAppeared = true;
           logger.info(`✅ TOTP field detected on attempt ${attempt + 1}`);
           break;
         }
       }
-      
+
       if (!totpFieldAppeared) {
         logger.warn('⚠️ TOTP field not detected after waiting. Continuing to search...');
       }
-      
+
       // Verify we're on the TOTP page by checking URL or page content
       const preTotpUrl = page.url();
       const hasTOTPIndicators = await page.evaluate(() => {
         const pageText = document.body.innerText || '';
-        return pageText.includes('TOTP') || 
-               pageText.includes('Two-factor') || 
-               pageText.includes('2FA') ||
-               pageText.includes('Enter code') ||
-               pageText.includes('authentication code');
+        return pageText.includes('TOTP') ||
+          pageText.includes('Two-factor') ||
+          pageText.includes('2FA') ||
+          pageText.includes('Enter code') ||
+          pageText.includes('authentication code');
       });
-      
+
       if (!hasTOTPIndicators && !preTotpUrl.includes('totp') && !preTotpUrl.includes('twofactor')) {
         // Check for error messages
         const errorMessage = await page.evaluate(() => {
           const errorElements = document.querySelectorAll('.error, .alert, [class*="error"], [class*="alert"]');
           return Array.from(errorElements).map(el => el.textContent || el.innerText).join(' | ') || null;
         });
-        
+
         if (errorMessage) {
           throw new Error(`Login failed: ${errorMessage}`);
         }
-        
+
         logger.warn(`⚠️ Page may not have navigated to TOTP page. URL: ${preTotpUrl}`);
         // Continue anyway - might still be on TOTP page
       } else {
         logger.info('✅ TOTP page detected');
       }
-      
+
       // Step 3: Handle TOTP
       logger.info('🔐 Generating and entering TOTP');
-      
+
       // Generate TOTP code
       const totp = otplib.authenticator.generate(totp_secret);
       logger.info(`✅ TOTP generated: ${totp}`);
-      
+
       // Log current page URL for debugging
       const totpPageUrl = page.url();
       logger.info(`🔗 Current page URL (TOTP page): ${totpPageUrl}`);
-      
+
       // Check if we're on TOTP page first to determine selector strategy
       const isOnTOTPPage = await page.evaluate(() => {
         const pageText = document.body.innerText || '';
-        return pageText.includes('TOTP') || 
-               pageText.includes('Two-factor') || 
-               pageText.includes('2FA') ||
-               pageText.includes('Enter code') ||
-               pageText.includes('authentication code');
+        return pageText.includes('TOTP') ||
+          pageText.includes('Two-factor') ||
+          pageText.includes('2FA') ||
+          pageText.includes('Enter code') ||
+          pageText.includes('authentication code');
       });
-      
+
       // Try multiple selectors for TOTP field (Zerodha may use different selectors)
       // Based on logs: TOTP field appears as type=number, maxLength=6, placeholder="••••••"
       // CRITICAL: Zerodha reuses #userid for TOTP field on TOTP page!
@@ -409,10 +409,10 @@ class TokenFetcher {
           '#totpcode'                            // Alternative ID
         ];
       }
-      
+
       let totpFieldFound = false;
       let usedSelector = null;
-      
+
       // Try each selector with a shorter timeout per attempt
       for (const selector of totpSelectors) {
         try {
@@ -421,27 +421,27 @@ class TokenFetcher {
             logger.info(`🔍 Trying TOTP selector: ${selector}`);
           }
           await page.waitForSelector(selector, { timeout: 5000 });
-          
+
           // Verify the element is visible and enabled, and check if it's actually a TOTP field
           const fieldInfo = await page.evaluate((sel) => {
             const element = document.querySelector(sel);
             if (!element) return null;
-            
+
             // Check page context - are we on TOTP page?
             const pageText = document.body.innerText || '';
-            const isTOTPPage = pageText.includes('TOTP') || 
-                             pageText.includes('Two-factor') || 
-                             pageText.includes('2FA') ||
-                             pageText.includes('Enter code') ||
-                             pageText.includes('authentication code');
-            
+            const isTOTPPage = pageText.includes('TOTP') ||
+              pageText.includes('Two-factor') ||
+              pageText.includes('2FA') ||
+              pageText.includes('Enter code') ||
+              pageText.includes('authentication code');
+
             // On TOTP page, a field with maxLength=6 and placeholder="••••••" is the TOTP field
             // even if it has id="userid" (Zerodha might reuse the same ID)
             const matchesTOTPCriteria = (element.maxLength === 6 || element.maxLength === 8) &&
-                                       (element.placeholder === '••••••' || 
-                                        (element.placeholder && element.placeholder.toLowerCase().includes('totp')) ||
-                                        element.autocomplete === 'one-time-code');
-            
+              (element.placeholder === '••••••' ||
+                (element.placeholder && element.placeholder.toLowerCase().includes('totp')) ||
+                element.autocomplete === 'one-time-code');
+
             return {
               exists: true,
               visible: element.offsetParent !== null,
@@ -453,9 +453,9 @@ class TokenFetcher {
               acceptable: matchesTOTPCriteria || (isTOTPPage && element.placeholder === '••••••' && element.maxLength === 6)
             };
           }, selector);
-          
-          if (fieldInfo && fieldInfo.exists && fieldInfo.visible && fieldInfo.enabled && 
-              fieldInfo.hasSize && fieldInfo.acceptable) {
+
+          if (fieldInfo && fieldInfo.exists && fieldInfo.visible && fieldInfo.enabled &&
+            fieldInfo.hasSize && fieldInfo.acceptable) {
             logger.info(`✅ TOTP field found with selector: ${selector} (on TOTP page: ${fieldInfo.isTOTPPage}, matches criteria: ${fieldInfo.matchesTOTPCriteria})`);
             usedSelector = selector;
             totpFieldFound = true;
@@ -474,30 +474,30 @@ class TokenFetcher {
           continue;
         }
       }
-      
+
       // If still not found, try direct approach: find any input with masked placeholder on TOTP page
       if (!totpFieldFound) {
         logger.info('🔍 Trying direct field search by characteristics...');
         const directField = await page.evaluate(() => {
           const inputs = Array.from(document.querySelectorAll('input'));
           const pageText = document.body.innerText || '';
-          const isTOTPPage = pageText.includes('TOTP') || 
-                           pageText.includes('Two-factor') || 
-                           pageText.includes('2FA') ||
-                           pageText.includes('Enter code');
-          
+          const isTOTPPage = pageText.includes('TOTP') ||
+            pageText.includes('Two-factor') ||
+            pageText.includes('2FA') ||
+            pageText.includes('Enter code');
+
           // Find input that matches TOTP characteristics
           for (const inp of inputs) {
             if (inp.offsetParent === null) continue; // Not visible
             if (inp.disabled) continue;
             if (inp.offsetWidth === 0 || inp.offsetHeight === 0) continue;
-            
+
             // Check if it matches TOTP criteria
             const hasMaskedPlaceholder = inp.placeholder === '••••••';
             const hasCorrectLength = inp.maxLength === 6 || inp.maxLength === 8;
             const hasTOTPAutocomplete = inp.autocomplete === 'one-time-code';
             const isNumberType = inp.type === 'number';
-            
+
             if (isTOTPPage && ((hasMaskedPlaceholder && hasCorrectLength) || hasTOTPAutocomplete || (hasMaskedPlaceholder && isNumberType))) {
               return {
                 id: inp.id,
@@ -512,14 +512,14 @@ class TokenFetcher {
           }
           return null;
         });
-        
+
         if (directField && directField.selector) {
           logger.info(`✅ TOTP field found via direct search: ${directField.selector}`);
           usedSelector = directField.selector;
           totpFieldFound = true;
         }
       }
-      
+
       if (!totpFieldFound) {
         // Take screenshot for debugging (silent - don't log)
         try {
@@ -527,7 +527,7 @@ class TokenFetcher {
         } catch (screenshotError) {
           // Silent fail
         }
-        
+
         // Try to find all input fields on the page (concise logging)
         try {
           const allInputs = await page.evaluate(() => {
@@ -543,14 +543,14 @@ class TokenFetcher {
               visible: input.offsetParent !== null
             }));
           });
-          
+
           // Log in single compact line to avoid rate limits
-          const inputsSummary = allInputs.map(inp => 
-            `id:${inp.id||'null'},name:${inp.name||'null'},type:${inp.type},maxLength:${inp.maxLength||'null'},visible:${inp.visible},placeholder:${inp.placeholder||'null'}`
+          const inputsSummary = allInputs.map(inp =>
+            `id:${inp.id || 'null'},name:${inp.name || 'null'},type:${inp.type},maxLength:${inp.maxLength || 'null'},visible:${inp.visible},placeholder:${inp.placeholder || 'null'}`
           ).join(' | ');
-          
+
           logger.error(`📋 All input fields (${allInputs.length}): ${inputsSummary}`);
-          
+
           // Also log TOTP candidates - better filtering
           // Look for fields with: maxLength 6/8 AND visible AND (TOTP-related placeholder OR no placeholder)
           const totpCandidates = allInputs.filter(inp => {
@@ -565,11 +565,11 @@ class TokenFetcher {
             );
             const isNotUserid = inp.id !== 'userid' && inp.name !== 'userid';
             const isNotPassword = inp.type !== 'password';
-            
-            return hasTOTPLength && isVisible && isNotUserid && isNotPassword && 
-                   (hasTOTPPlaceholder || !inp.placeholder || inp.autocomplete === 'one-time-code');
+
+            return hasTOTPLength && isVisible && isNotUserid && isNotPassword &&
+              (hasTOTPPlaceholder || !inp.placeholder || inp.autocomplete === 'one-time-code');
           });
-          
+
           if (totpCandidates.length > 0) {
             logger.error(`🎯 TOTP field candidates: ${JSON.stringify(totpCandidates.map(inp => ({
               id: inp.id,
@@ -596,14 +596,14 @@ class TokenFetcher {
         } catch (htmlError) {
           logger.warn('Failed to get page HTML:', htmlError.message);
         }
-        
+
         throw new Error('TOTP input field not found. Zerodha login page structure may have changed. Please check the page and update selectors. Check screenshot and logs for page structure.');
       }
-      
+
       // Type TOTP code into the field
       logger.info(`📝 Entering TOTP code into field: ${usedSelector}`);
       await page.type(usedSelector, totp, { delay: 100 }); // Add small delay for reliability
-      
+
       // Find and click submit button (try multiple selectors)
       const submitSelectors = [
         'button[type="submit"]',
@@ -615,7 +615,7 @@ class TokenFetcher {
         'form button[type="button"]', // Some forms use button instead of submit
         'button' // Generic button as last resort
       ];
-      
+
       let submitButtonClicked = false;
       for (const submitSelector of submitSelectors) {
         try {
@@ -624,16 +624,16 @@ class TokenFetcher {
             const buttonInfo = await page.evaluate((sel) => {
               const btn = document.querySelector(sel);
               if (!btn) return null;
-              
+
               return {
                 visible: btn.offsetParent !== null,
                 text: btn.textContent || btn.innerText || '',
                 type: btn.type || '',
                 hasLoginText: (btn.textContent || btn.innerText || '').toLowerCase().includes('login') ||
-                             (btn.textContent || btn.innerText || '').toLowerCase().includes('submit')
+                  (btn.textContent || btn.innerText || '').toLowerCase().includes('submit')
               };
             }, submitSelector);
-            
+
             if (buttonInfo && buttonInfo.visible && (buttonInfo.type === 'submit' || buttonInfo.hasLoginText || submitSelector.includes('submit'))) {
               logger.info(`✅ Clicking submit button with selector: ${submitSelector}`);
               await page.click(submitSelector);
@@ -645,24 +645,24 @@ class TokenFetcher {
           continue;
         }
       }
-      
+
       // Fallback: Press Enter if no submit button found
       if (!submitButtonClicked) {
         logger.warn('⚠️ Submit button not found, pressing Enter key');
         await page.keyboard.press('Enter');
       }
-      
+
       // Step 4: Wait for redirect and extract request token
       // CRITICAL: Interceptors are already set up above (before navigation)
       // They should have captured request_token from the callback URL
       logger.info('⏳ Waiting for authentication redirect');
-      
+
       let redirectUrl = null;
       let requestToken = null;
-      
+
       // Wait a moment for interceptors to capture the redirect
       await new Promise(resolve => setTimeout(resolve, 1000));
-      
+
       // Check if we already intercepted the request_token (before waiting for navigation)
       if (interceptedRequestToken && interceptedCallbackUrl) {
         requestToken = interceptedRequestToken;
@@ -674,13 +674,13 @@ class TokenFetcher {
         // If not intercepted yet, wait for navigation
         try {
           // Wait for navigation event (redirect happens after TOTP submission)
-          const navigationPromise = page.waitForNavigation({ 
-            waitUntil: 'networkidle2', 
-            timeout: 30000 
+          const navigationPromise = page.waitForNavigation({
+            waitUntil: 'networkidle2',
+            timeout: 30000
           });
-          
+
           await navigationPromise;
-          
+
           // Check interceptors again after navigation
           if (interceptedRequestToken && interceptedCallbackUrl && !requestToken) {
             requestToken = interceptedRequestToken;
@@ -689,15 +689,15 @@ class TokenFetcher {
           } else {
             const currentUrl = page.url();
             logger.info(`🔗 Navigation completed, current URL: ${currentUrl}`);
-            
+
             // Check current URL for request_token (might be in URL)
             redirectUrl = currentUrl;
             logger.info(`🔗 Checking current URL for request_token: ${redirectUrl}`);
           }
-        
+
           // Wait a bit more in case there's another redirect
           await new Promise(resolve => setTimeout(resolve, 2000));
-          
+
           // Check interceptors again after waiting
           if (interceptedRequestToken && interceptedCallbackUrl && !requestToken) {
             requestToken = interceptedRequestToken;
@@ -712,7 +712,7 @@ class TokenFetcher {
           }
         } catch (navError) {
           logger.warn(`⚠️ Navigation timeout (${navError.message}), checking current URL anyway`);
-          
+
           // Check interceptors one more time
           if (interceptedRequestToken && interceptedCallbackUrl && !requestToken) {
             requestToken = interceptedRequestToken;
@@ -723,10 +723,10 @@ class TokenFetcher {
               redirectUrl = page.url();
               logger.info(`🔗 Current URL (after timeout): ${redirectUrl}`);
             }
-            
+
             // Wait a bit more for any delayed redirects
             await new Promise(resolve => setTimeout(resolve, 2000));
-            
+
             // Final check of interceptors
             if (interceptedRequestToken && interceptedCallbackUrl && !requestToken) {
               requestToken = interceptedRequestToken;
@@ -742,9 +742,9 @@ class TokenFetcher {
           }
         }
       }
-      
+
       logger.info(`🔗 Final redirect URL: ${redirectUrl}`);
-      
+
       // Try to extract request_token from multiple locations (if not already extracted from interceptor)
       // NOTE: requestToken variable is already declared above in the interceptor section
       if (!requestToken && redirectUrl) {
@@ -752,13 +752,13 @@ class TokenFetcher {
           // Try query parameter first (most common)
           const urlObj = new URL(redirectUrl);
           requestToken = urlObj.searchParams.get('request_token');
-          
+
           // Try hash fragment if not in query params
           if (!requestToken && urlObj.hash) {
             const hashParams = new URLSearchParams(urlObj.hash.substring(1));
             requestToken = hashParams.get('request_token');
           }
-          
+
           // Try parsing the entire URL/hash for request_token
           if (!requestToken) {
             const requestTokenMatch = redirectUrl.match(/request_token[=:]([^&?#\s]+)/i);
@@ -770,55 +770,55 @@ class TokenFetcher {
           logger.error(`❌ Error parsing redirect URL: ${urlError.message}`);
         }
       }
-      
+
       if (!requestToken) {
         // Log full redirect URL for debugging
         logger.error(`❌ Request token not found in redirect URL: ${redirectUrl}`);
         logger.error(`🔍 URL breakdown - Protocol: ${redirectUrl.split('://')[0]}, Host: ${redirectUrl.split('/')[2]}, Path: ${redirectUrl.split('?')[0]}, Query: ${redirectUrl.split('?')[1] || 'none'}, Hash: ${redirectUrl.split('#')[1] || 'none'}`);
-        
+
         // Check if we're still on the same page (maybe TOTP submission failed)
         const currentPageText = await page.evaluate(() => document.body.innerText || '');
-        const stillOnTOTPPage = currentPageText.includes('TOTP') || 
-                               currentPageText.includes('Two-factor') || 
-                               currentPageText.includes('2FA');
-        
+        const stillOnTOTPPage = currentPageText.includes('TOTP') ||
+          currentPageText.includes('Two-factor') ||
+          currentPageText.includes('2FA');
+
         if (stillOnTOTPPage) {
           // Check for error messages
           const errorMessage = await page.evaluate(() => {
             const errorElements = document.querySelectorAll('.error, .alert, [class*="error"], [class*="alert"]');
             return Array.from(errorElements).map(el => el.textContent || el.innerText).join(' | ') || null;
           });
-          
+
           if (errorMessage) {
             throw new Error(`TOTP submission failed: ${errorMessage}`);
           } else {
             throw new Error('TOTP submission may have failed - still on TOTP page and no request token found');
           }
         }
-        
+
         throw new Error(`Request token not found in redirect URL. Full URL: ${redirectUrl}`);
       }
-      
+
       logger.info(`✅ Request token extracted: ${requestToken.substring(0, 10)}...`);
-      
+
       // Close page but keep browser in pool
       await page.close();
       page = null;
-      
+
       // Step 5: Generate session using KiteConnect
       logger.info('🔄 Generating session with KiteConnect API');
       const kite = new KiteConnect({ api_key });
       const session = await kite.generateSession(requestToken, api_secret);
-      
+
       const executionTime = Date.now() - startTime;
       logger.info(`✅ Token generation successful in ${executionTime}ms`);
-      
+
       // Release browser back to pool before returning
       if (browserInfo) {
         browserPool.release(browserInfo.id);
         logger.info(`🔄 Released browser ${browserInfo.id} back to pool`);
       }
-      
+
       return {
         access_token: session.access_token,
         public_token: session.public_token || null,
@@ -826,11 +826,11 @@ class TokenFetcher {
         expires_at: this.calculateExpiry(session.login_time || new Date()),
         execution_time_ms: executionTime
       };
-      
+
     } catch (error) {
-        logger.error(`❌ Token fetch failed: ${error.message}`);
+      logger.error(`❌ Token fetch failed: ${error.message}`);
       logger.error(error.stack);
-      
+
       // Cleanup: close page if it exists
       if (page) {
         try {
@@ -839,7 +839,7 @@ class TokenFetcher {
           logger.warn(`Failed to close page: ${closeError.message}`);
         }
       }
-      
+
       // 🔥 BROWSER POOL: Release browser back to pool (don't close it)
       if (browserInfo) {
         try {
@@ -849,26 +849,26 @@ class TokenFetcher {
           logger.warn(`Failed to release browser: ${releaseError.message}`);
         }
       }
-      
+
       throw error;
     }
   }
-  
+
   calculateExpiry(loginTime) {
     // Kite tokens expire at 11:59 PM IST on the same day
     const loginDate = new Date(loginTime);
-    
+
     // Convert to IST
     const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
     const loginIST = new Date(loginDate.getTime() + istOffset);
-    
+
     // Set to 11:59 PM IST
     const expiryIST = new Date(loginIST);
     expiryIST.setHours(23, 59, 59, 999);
-    
+
     // Convert back to UTC
     const expiryUTC = new Date(expiryIST.getTime() - istOffset);
-    
+
     return expiryUTC.toISOString();
   }
 }
