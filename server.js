@@ -86,9 +86,17 @@ app.use(errorHandler);
 async function startServer() {
   // Start server FIRST to ensure it's listening ASAP for healthchecks
   // Then initialize other services in background
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    logger.info(`✅ TokenBot Service running on port ${PORT}`);
-    logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  return new Promise((resolve, reject) => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      logger.info(`✅ TokenBot Service running on port ${PORT}`);
+      logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      resolve(server);
+    });
+
+    server.on('error', (error) => {
+      logger.error(`❌ Server error: ${error.message}`);
+      reject(error);
+    });
   });
 
   // Initialize services in background (non-blocking)
