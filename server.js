@@ -136,7 +136,8 @@ async function startServer() {
     }
     
     // Start server (always start, even with missing config)
-    app.listen(PORT, () => {
+    // Listen on 0.0.0.0 to accept connections from Railway's healthcheck
+    app.listen(PORT, '0.0.0.0', () => {
       logger.info(`✅ TokenBot Service running on port ${PORT}`);
       logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`📊 Status: ${missingVars.length > 0 ? 'Limited Mode' : 'Fully Operational'}`);

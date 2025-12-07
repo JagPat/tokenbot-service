@@ -57,7 +57,7 @@ router.get('/', async (req, res) => {
       used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
       total_mb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
     },
-    browser_pool: browserPool.getStats()
+    browser_pool: browserPool ? browserPool.getStats() : { error: 'not_available' }
   });
 });
 
