@@ -1,5 +1,6 @@
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 watchPatterns = ["**/*.js", "package.json", "services/**", "routes/**", "config/**"]
 
 [deploy]
