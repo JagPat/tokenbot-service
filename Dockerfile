@@ -1,78 +1,42 @@
-FROM node:18-alpine
+FROM node:18-slim
 
-# Install system dependencies with proper error handling and cleanup
-# CRITICAL: Install Chromium and all required dependencies for Railway
-RUN apk update && \
-    apk add --no-cache \
-    chromium \
-    chromium-chromedriver \
-    nss \
-    freetype \
-    harfbuzz \
-    ca-certificates \
-    ttf-freefont \
-    ttf-dejavu \
-    ttf-liberation \
-    font-noto \
-    libgcc \
-    libstdc++ \
-    && rm -rf /var/cache/apk/*
+# Install latest chrome dev package and fonts to support major charsets
+# Note: this installs the necessary libs to make the bundled version of Chromium that Puppeteer
+# installs, work.
+RUN apt-get update \
+    && apt-get install -y wget gnupg procps \
+    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
+      --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
-# CRITICAL: Set proper permissions for Chromium sandbox (prevents crashpad errors)
-# Also create dummy crashpad handler to prevent "No such file or directory" errors
-RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || true && \
-    chmod 4755 /usr/lib/chromium/chromium-sandbox || true && \
-    # CRITICAL: Create dummy crashpad handler BEFORE removing original (if it exists)
-    # Chromium requires this file to exist, so we create a no-op script
-    mkdir -p /usr/lib/chromium && \
-    echo '#!/bin/sh' > /usr/lib/chromium/chrome_crashpad_handler && \
-    echo 'exit 0' >> /usr/lib/chromium/chrome_crashpad_handler && \
-    chmod 755 /usr/lib/chromium/chrome_crashpad_handler && \
-    # Also create chromium_crashpad_handler as fallback
-    cp /usr/lib/chromium/chrome_crashpad_handler /usr/lib/chromium/chromium_crashpad_handler 2>/dev/null || true && \
-    # Verify Chromium installation
-    chromium-browser --version || chromium --version || echo "Warning: Chromium version check failed"
-
-# Install curl separately with retry logic for network resilience
-RUN apk add --no-cache curl || \
-    (sleep 2 && apk update && apk add --no-cache curl) || \
-    echo "Warning: curl installation failed, health check may not work"
-
-# Tell Puppeteer to skip downloading Chrome and use system Chromium
+# Tell Puppeteer to skip installing Chrome. We'll be using the installed package.
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
-    CHROME_BIN=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable \
+    CHROME_BIN=/usr/bin/google-chrome-stable
 
-# Create app directory
 WORKDIR /app
 
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
 RUN npm ci --only=production
 
-# Copy application files
 COPY . .
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S tokenbot -u 1001
+# Create non-root user
+RUN groupadd -r tokenbot && useradd -r -g tokenbot -G audio,video tokenbot \
+    && mkdir -p /home/tokenbot/Downloads \
+    && chown -R tokenbot:tokenbot /home/tokenbot \
+    && mkdir -p logs && chown -R tokenbot:tokenbot /app
 
-# Create logs directory and set permissions
-RUN mkdir -p logs && chmod 755 logs && \
-    chown -R tokenbot:nodejs /app
-
-# Switch to non-root user
 USER tokenbot
 
-# Expose port
 EXPOSE 3000
 
-# Health check using Node.js (always available, no dependency on curl)
+# Health Check (Node-based to avoid curl dependency issues if any)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
-# Start application
 CMD ["npm", "start"]
 
