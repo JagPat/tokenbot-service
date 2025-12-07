@@ -8,11 +8,13 @@ USER root
 
 # Skip chromium download (use image's bundled chrome)
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 WORKDIR /app
 
 COPY package*.json ./
 # Install app dependencies
+# USER pptruser
 RUN npm install
 
 COPY . .
@@ -23,7 +25,7 @@ USER root
 RUN mkdir -p logs && chown -R pptruser:pptruser /app
 
 # Switch back to the non-root user provided by the image
-USER pptruser
+# USER pptruser
 
 EXPOSE 3000
 
