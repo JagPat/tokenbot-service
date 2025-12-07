@@ -3,6 +3,10 @@ FROM ghcr.io/puppeteer/puppeteer:21.5.2
 # Switch to root to install dependencies/fix permissions if needed (though usually not needed)
 USER root
 
+# Skip chromium download (use image's bundled chrome)
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+
 WORKDIR /app
 
 COPY package*.json ./
