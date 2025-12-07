@@ -199,23 +199,18 @@ class BrowserPool {
 
       // Create browser with optimized args
       browser = await puppeteer.launch({
-        headless: 'new',
+        headless: true, // Use legacy headless for better Alpine compatibility
         protocolTimeout: 120000,
         timeout: 90000,
         args: this.getBrowserArgs(),
-        executablePath: executablePath,
+        executablePath: executablePath || '/usr/bin/chromium-browser',
         ignoreHTTPSErrors: true,
+        dumpio: true, // Output Chrome logs to stdout for debugging
         env: {
           ...process.env,
-          NODE_OPTIONS: '--max-old-space-size=512',
-          PUPPETEER_DISABLE_CRASHPAD: '1',
-          CHROME_CRASHPAD_DISABLED: '1',
-          NODE_NO_WARNINGS: '1'
-        },
-        dumpio: true, // Output Chrome logs to stdout for debugging
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false
+          // Ensure no weird env vars break it
+          NODE_OPTIONS: undefined
+        }
       });
 
       const launchTime = Date.now() - startTime;
