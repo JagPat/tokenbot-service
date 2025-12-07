@@ -86,7 +86,7 @@ app.use(errorHandler);
 async function startServer() {
   // Start server FIRST to ensure it's listening ASAP for healthchecks
   // Then initialize other services in background
-  return new Promise((resolve, reject) => {
+  const server = await new Promise((resolve, reject) => {
     const server = app.listen(PORT, '0.0.0.0', () => {
       logger.info(`✅ TokenBot Service running on port ${PORT}`);
       logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -100,7 +100,9 @@ async function startServer() {
   });
 
   // Initialize services in background (non-blocking)
-  try {
+  // Don't await - let it run in background so server responds immediately
+  (async () => {
+    try {
     logger.info('🚀 Starting TokenBot Service...');
     
     // Check required environment variables
