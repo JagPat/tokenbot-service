@@ -2,7 +2,14 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const logger = require('../utils/logger');
-const browserPool = require('../services/browserPool');
+
+// Safely import browserPool - don't crash if it fails to load
+let browserPool = null;
+try {
+  browserPool = require('../services/browserPool');
+} catch (error) {
+  logger.warn('Browser pool not available:', error.message);
+}
 
 /**
  * GET /health
