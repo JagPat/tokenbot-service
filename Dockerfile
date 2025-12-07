@@ -10,8 +10,8 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 WORKDIR /app
 
 COPY package*.json ./
-# Install app dependencies
-RUN npm install
+# Install app dependencies (use npm ci for reproducible builds)
+RUN npm ci --omit=dev
 
 COPY . .
 
