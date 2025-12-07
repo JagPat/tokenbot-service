@@ -84,6 +84,14 @@ app.use(errorHandler);
 
 // Startup
 async function startServer() {
+  // Start server FIRST to ensure it's listening ASAP for healthchecks
+  // Then initialize other services in background
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    logger.info(`✅ TokenBot Service running on port ${PORT}`);
+    logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+
+  // Initialize services in background (non-blocking)
   try {
     logger.info('🚀 Starting TokenBot Service...');
     
@@ -135,25 +143,14 @@ async function startServer() {
       logger.warn('⚠️ Scheduler disabled (no database connection)');
     }
     
-    // Start server (always start, even with missing config)
-    // Listen on 0.0.0.0 to accept connections from Railway's healthcheck
-    app.listen(PORT, '0.0.0.0', () => {
-      logger.info(`✅ TokenBot Service running on port ${PORT}`);
-      logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`📊 Status: ${missingVars.length > 0 ? 'Limited Mode' : 'Fully Operational'}`);
-      if (missingVars.length === 0) {
-        logger.info(`📅 Scheduler: Active (8:00 AM IST daily)`);
-      }
-    });
+    logger.info(`📊 Status: ${missingVars.length > 0 ? 'Limited Mode' : 'Fully Operational'}`);
+    if (missingVars.length === 0) {
+      logger.info(`📅 Scheduler: Active (8:00 AM IST daily)`);
+    }
     
   } catch (error) {
-    logger.error('❌ Failed to start server:', error);
-    // Don't exit - let Railway see the error but keep service running
-    logger.warn('⚠️ Starting in degraded mode');
-    
-    app.listen(PORT, '0.0.0.0', () => {
-      logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
-    });
+    logger.error('❌ Failed to initialize services:', error);
+    logger.warn('⚠️ Service running in degraded mode');
   }
 }
 
