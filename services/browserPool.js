@@ -185,6 +185,13 @@ class BrowserPool {
     try {
       logger.info('🚀 Creating new browser instance...');
 
+      // #region agent log
+      const fs = require('fs');
+      const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
+      const chromeExists = fs.existsSync(execPath);
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:187',message:'Browser launch - checking Chrome path',data:{executablePath:execPath,exists:chromeExists,envPath:process.env.PUPPETEER_EXECUTABLE_PATH},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion agent log
+
       // Standardizing args for official Docker image
       const args = [
         '--no-sandbox',
@@ -195,13 +202,20 @@ class BrowserPool {
         '--no-zygote'
       ];
 
-      // Create browser with standardized args
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:199',message:'Before puppeteer.launch',data:{executablePath:execPath,argsCount:args.length,headless:true},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion agent log
+
+      // Create browser with explicit executablePath for Docker image
+      // Use system Chrome from Puppeteer Docker image
+      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
+      
       browser = await puppeteer.launch({
         headless: true,
+        executablePath: executablePath, // CRITICAL: Explicitly set Chrome path
         protocolTimeout: 120000,
         timeout: 90000,
         args: args,
-        // Remove executablePath to let Puppeteer use the bundled Chrome
         ignoreHTTPSErrors: true,
         dumpio: true, // Output Chrome logs to stdout for debugging
         env: {
@@ -209,6 +223,10 @@ class BrowserPool {
           NODE_OPTIONS: undefined
         }
       });
+
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:217',message:'After puppeteer.launch - success',data:{executablePath:executablePath,browserConnected:browser.isConnected()},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion agent log
 
       const launchTime = Date.now() - startTime;
       logger.info(`✅ Browser created successfully in ${launchTime}ms`);
