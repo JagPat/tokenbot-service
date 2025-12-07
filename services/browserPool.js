@@ -29,10 +29,10 @@ class BrowserPool {
       threshold: 3,
       resetTimeout: 60000 // 1 minute
     };
-    
+
     // Start cleanup interval
     this.cleanupInterval = setInterval(() => this.cleanup(), 60000); // Every minute
-    
+
     // Monitor memory pressure
     this.memoryCheckInterval = setInterval(() => this.checkMemoryPressure(), 30000); // Every 30 seconds
   }
@@ -96,19 +96,19 @@ class BrowserPool {
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
       const memUsagePercent = (usedMem / totalMem) * 100;
-      
+
       // Log memory stats periodically
       if (this.stats.created % 5 === 0) {
         logger.info(`💾 Memory: ${(usedMem / 1024 / 1024 / 1024).toFixed(2)}GB used / ${(totalMem / 1024 / 1024 / 1024).toFixed(2)}GB total (${memUsagePercent.toFixed(1)}%)`);
       }
-      
+
       // If memory usage > 85%, mark as pressure
       if (memUsagePercent > 85) {
         this.stats.memoryPressure++;
         logger.warn(`⚠️ High memory pressure: ${memUsagePercent.toFixed(1)}% used`);
         return true;
       }
-      
+
       return false;
     } catch (error) {
       logger.warn(`Failed to check memory: ${error.message}`);
@@ -121,7 +121,7 @@ class BrowserPool {
    */
   checkCircuitBreaker() {
     const { state, failures, lastFailure, resetTimeout } = this.circuitBreaker;
-    
+
     if (state === 'OPEN') {
       if (lastFailure && Date.now() - lastFailure > resetTimeout) {
         logger.info('🔄 Circuit breaker: Moving to HALF_OPEN state');
@@ -131,7 +131,7 @@ class BrowserPool {
       logger.warn('🚫 Circuit breaker: OPEN - browser launches blocked');
       return true; // Block launches
     }
-    
+
     return false; // Allow launches
   }
 
@@ -141,7 +141,7 @@ class BrowserPool {
   recordFailure() {
     this.circuitBreaker.failures++;
     this.circuitBreaker.lastFailure = Date.now();
-    
+
     if (this.circuitBreaker.failures >= this.circuitBreaker.threshold) {
       this.circuitBreaker.state = 'OPEN';
       logger.error(`🚫 Circuit breaker: OPENED after ${this.circuitBreaker.failures} failures`);
@@ -172,7 +172,7 @@ class BrowserPool {
     if (this.checkMemoryPressure()) {
       logger.warn('⚠️ High memory pressure detected, delaying browser creation');
       await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
-      
+
       // Check again
       if (this.checkMemoryPressure()) {
         throw new Error('Insufficient memory for browser launch. Please try again later.');
@@ -184,7 +184,7 @@ class BrowserPool {
 
     try {
       logger.info('🚀 Creating new browser instance...');
-      
+
       // Determine Chromium executable path
       const chromiumPaths = [
         process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -212,6 +212,7 @@ class BrowserPool {
           CHROME_CRASHPAD_DISABLED: '1',
           NODE_NO_WARNINGS: '1'
         },
+        dumpio: true, // Output Chrome logs to stdout for debugging
         handleSIGINT: false,
         handleSIGTERM: false,
         handleSIGHUP: false
@@ -219,10 +220,10 @@ class BrowserPool {
 
       const launchTime = Date.now() - startTime;
       logger.info(`✅ Browser created successfully in ${launchTime}ms`);
-      
+
       this.stats.created++;
       this.recordSuccess();
-      
+
       // Track browser
       const browserInfo = {
         browser,
@@ -231,29 +232,29 @@ class BrowserPool {
         useCount: 0,
         id: `browser-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
       };
-      
+
       // Monitor browser process
       browser.on('disconnected', () => {
         logger.info(`🔌 Browser ${browserInfo.id} disconnected`);
         this.removeBrowser(browserInfo.id);
       });
-      
+
       return browserInfo;
-      
+
     } catch (error) {
       const launchTime = Date.now() - startTime;
       logger.error(`❌ Browser creation failed after ${launchTime}ms: ${error.message}`);
-      
+
       this.stats.errors++;
       this.recordFailure();
-      
+
       // Enhanced error context
       if (error.message?.includes('Resource temporarily unavailable') ||
-          error.message?.includes('ENOMEM') ||
-          error.message?.includes('Cannot allocate memory')) {
+        error.message?.includes('ENOMEM') ||
+        error.message?.includes('Cannot allocate memory')) {
         throw new Error('Browser launch failed due to insufficient resources. Railway container may need more memory/CPU allocated.');
       }
-      
+
       throw error;
     }
   }
@@ -287,17 +288,17 @@ class BrowserPool {
     // Check pool size limit
     if (this.pool.length >= this.maxPoolSize) {
       logger.warn(`⚠️ Pool size limit reached (${this.maxPoolSize}), waiting for available browser...`);
-      
+
       // Wait up to 10 seconds for a browser to become available
       for (let i = 0; i < 10; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
         const nowAvailable = this.pool.find(b => {
           const isIdle = !this.activeBrowsers.has(b.id);
           const isHealthy = b.browser && b.browser.isConnected();
           return isIdle && isHealthy;
         });
-        
+
         if (nowAvailable) {
           nowAvailable.lastUsed = Date.now();
           nowAvailable.useCount++;
@@ -307,7 +308,7 @@ class BrowserPool {
           return nowAvailable;
         }
       }
-      
+
       throw new Error('Browser pool exhausted. Please try again later.');
     }
 
@@ -315,7 +316,7 @@ class BrowserPool {
     const browserInfo = await this.createBrowser();
     this.pool.push(browserInfo);
     this.activeBrowsers.add(browserInfo.id);
-    
+
     return browserInfo;
   }
 
@@ -339,7 +340,7 @@ class BrowserPool {
     if (index !== -1) {
       const browserInfo = this.pool[index];
       this.activeBrowsers.delete(browserId);
-      
+
       try {
         if (browserInfo.browser && browserInfo.browser.isConnected()) {
           await browserInfo.browser.close();
@@ -347,7 +348,7 @@ class BrowserPool {
       } catch (error) {
         logger.warn(`Failed to close browser ${browserId}: ${error.message}`);
       }
-      
+
       this.pool.splice(index, 1);
       this.stats.closed++;
       logger.info(`🗑️ Removed browser ${browserId} from pool`);
@@ -360,7 +361,7 @@ class BrowserPool {
   async cleanup() {
     const now = Date.now();
     const toRemove = [];
-    
+
     for (const browserInfo of this.pool) {
       const isIdle = !this.activeBrowsers.has(browserInfo.id);
       const idleTime = now - browserInfo.lastUsed;
@@ -368,16 +369,16 @@ class BrowserPool {
       const isExpired = age > this.maxAge;
       const isIdleTooLong = isIdle && idleTime > this.idleTimeout;
       const isDisconnected = !browserInfo.browser || !browserInfo.browser.isConnected();
-      
+
       if (isDisconnected || isExpired || isIdleTooLong) {
         toRemove.push(browserInfo.id);
       }
     }
-    
+
     for (const browserId of toRemove) {
       await this.removeBrowser(browserId);
     }
-    
+
     if (toRemove.length > 0) {
       logger.info(`🧹 Cleaned up ${toRemove.length} browser(s) from pool`);
     }
@@ -410,15 +411,15 @@ class BrowserPool {
    */
   async shutdown() {
     logger.info('🛑 Shutting down browser pool...');
-    
+
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
     }
-    
+
     if (this.memoryCheckInterval) {
       clearInterval(this.memoryCheckInterval);
     }
-    
+
     // Close all browsers
     const closePromises = this.pool.map(browserInfo => {
       if (browserInfo.browser && browserInfo.browser.isConnected()) {
@@ -427,11 +428,11 @@ class BrowserPool {
         });
       }
     });
-    
+
     await Promise.all(closePromises);
     this.pool = [];
     this.activeBrowsers.clear();
-    
+
     logger.info('✅ Browser pool shut down');
   }
 }
