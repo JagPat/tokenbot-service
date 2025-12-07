@@ -185,30 +185,27 @@ class BrowserPool {
     try {
       logger.info('🚀 Creating new browser instance...');
 
-      // Determine Chromium executable path
-      const chromiumPaths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        process.env.CHROME_BIN,
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable'
-      ].filter(Boolean);
+      // Standardizing args for official Docker image
+      const args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote'
+      ];
 
-      const executablePath = chromiumPaths[0] || undefined;
-
-      // Create browser with optimized args
+      // Create browser with standardized args
       browser = await puppeteer.launch({
-        headless: true, // Use legacy headless for better Alpine compatibility
+        headless: true,
         protocolTimeout: 120000,
         timeout: 90000,
-        args: this.getBrowserArgs(),
-        executablePath: executablePath || '/usr/bin/chromium-browser',
+        args: args,
+        // Remove executablePath to let Puppeteer use the bundled Chrome
         ignoreHTTPSErrors: true,
         dumpio: true, // Output Chrome logs to stdout for debugging
         env: {
           ...process.env,
-          // Ensure no weird env vars break it
           NODE_OPTIONS: undefined
         }
       });
