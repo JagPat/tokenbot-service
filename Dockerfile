@@ -11,7 +11,8 @@ WORKDIR /app
 
 COPY package*.json ./
 # Install app dependencies (use npm ci for reproducible builds)
-RUN npm ci --omit=dev
+# Cache bust: ensure fresh install on every build
+RUN npm ci --omit=dev --no-audit
 
 COPY . .
 
