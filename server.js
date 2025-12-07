@@ -151,7 +151,7 @@ async function startServer() {
     // Don't exit - let Railway see the error but keep service running
     logger.warn('⚠️ Starting in degraded mode');
     
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
     });
   }
