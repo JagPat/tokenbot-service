@@ -8,18 +8,18 @@ USER root
 
 # Skip chromium download (use image's bundled chrome)
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 WORKDIR /app
 
 COPY package*.json ./
-# Install app dependencies (use npm ci for reproducible builds)
-# Cache bust: ensure fresh install on every build
-RUN npm ci --omit=dev --no-audit
+# Install app dependencies
+RUN npm install
 
 COPY . .
 
 # Create logs directory and fix permissions for pptruser (default user in this image)
+# This step requires root, so we temporarily switch to root.
+USER root
 RUN mkdir -p logs && chown -R pptruser:pptruser /app
 
 # Switch back to the non-root user provided by the image
