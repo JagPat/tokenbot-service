@@ -1,5 +1,8 @@
 FROM ghcr.io/puppeteer/puppeteer:21.5.2
 
+# Cache bust: Force Railway to use latest Dockerfile
+# Build timestamp: 2025-12-07
+
 # Switch to root to install dependencies/fix permissions if needed (though usually not needed)
 USER root
 
