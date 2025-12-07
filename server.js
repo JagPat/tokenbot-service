@@ -167,17 +167,35 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-// Handle uncaught errors
+// Handle uncaught errors - but don't exit immediately, let server try to start
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught Exception:', error);
-  process.exit(1);
+  logger.error('Stack:', error.stack);
+  // Don't exit immediately - let Railway see the error in logs
+  // Process will exit naturally if server can't start
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
+  // Don't exit immediately - let server continue
 });
 
-// Start the server
-startServer();
+// Start the server with error handling
+(async () => {
+  try {
+    await startServer();
+  } catch (error) {
+    logger.error('❌ Failed to start server:', error);
+    logger.error('Stack:', error.stack);
+    // Try to start server anyway in degraded mode
+    try {
+      app.listen(PORT, '0.0.0.0', () => {
+        logger.info(`⚠️ TokenBot Service running in emergency mode on port ${PORT}`);
+      });
+    } catch (listenError) {
+      logger.error('❌ Failed to start server even in emergency mode:', listenError);
+      process.exit(1);
+    }
+  }
+})();
 
