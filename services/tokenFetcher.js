@@ -36,10 +36,14 @@ class TokenFetcher {
       let interceptedRequestToken = null;
       let interceptedCallbackUrl = null;
 
+      // Enable request interception to stop the backend from consuming the token
+      await page.setRequestInterception(true);
+
       // Intercept requests to catch redirect to callback URL (BEFORE backend processes it)
       page.on('request', (request) => {
         const requestUrl = request.url();
-        // Only log callback-related requests (reduced logging)
+
+        // Check for callback URL
         if (requestUrl.includes('/api/modules/auth/broker/callback') && requestUrl.includes('request_token')) {
           logger.info(`🎯 Intercepted callback REQUEST: ${requestUrl}`);
 
@@ -64,10 +68,21 @@ class TokenFetcher {
               interceptedRequestToken = token;
               interceptedCallbackUrl = requestUrl;
               logger.info(`✅✅✅ Request token EXTRACTED from REQUEST: ${token.substring(0, 10)}...`);
+
+              // CRITICAL: Abort the request so the backend (Chanakya Web) doesn't receive/consume the token!
+              logger.info(`🛑 ABORTING callback request to prevent backend consumption.`);
+              request.abort('blockedbyclient');
+              return;
             }
           } catch (urlError) {
             logger.warn(`⚠️ Error parsing intercepted request URL: ${urlError.message}`);
           }
+        }
+
+        // Continue all other requests (or if extraction failed)
+        // Safe check to ensure we don't crash if request is already handled
+        if (!request.isInterceptResolutionHandled()) {
+          request.continue();
         }
       });
 
