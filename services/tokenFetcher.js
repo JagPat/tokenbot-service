@@ -212,9 +212,12 @@ class TokenFetcher {
       ];
 
       let loginUserSelector = null;
+      let hiddenUserCandidate = null;
+
       for (const selector of loginUserSelectors) {
         try {
           // Reduced timeout for faster iteration on invalid selectors
+          // NOTE: waitForSelector checks for presence (in DOM), not visibility, unless {visible: true} is set
           await page.waitForSelector(selector, { timeout: 2000 });
           const fieldInfo = await page.evaluate(sel => {
             const element = document.querySelector(sel);
@@ -229,17 +232,33 @@ class TokenFetcher {
             };
           }, selector);
 
-          if (fieldInfo?.visible && fieldInfo?.enabled) {
-            // Avoid password fields or hidden inputs
-            if (fieldInfo.type !== 'password' && fieldInfo.type !== 'hidden') {
-              loginUserSelector = selector;
-              logger.info(`✅ Using login selector: ${selector} (ID: ${fieldInfo.id}, Placeholder: ${fieldInfo.placeholder})`);
-              break;
+          if (fieldInfo) {
+            // Valid structural match (in DOM and enabled, not password/hidden type)
+            if (fieldInfo.enabled && fieldInfo.type !== 'password' && fieldInfo.type !== 'hidden') {
+              if (fieldInfo.visible) {
+                // Perfect match: Visible
+                loginUserSelector = selector;
+                logger.info(`✅ Using visible login selector: ${selector}`);
+                break;
+              } else {
+                // Possible match: Hidden (maybe pre-filled)
+                // Prioritize #userid as it is the standard ID
+                if (!hiddenUserCandidate || selector === '#userid') {
+                  hiddenUserCandidate = selector;
+                  logger.info(`⚠️ Found hidden candidate selector: ${selector}`);
+                }
+              }
             }
           }
         } catch (selectorError) {
           continue;
         }
+      }
+
+      // If no visible selector found, but we have a hidden one, use it
+      if (!loginUserSelector && hiddenUserCandidate) {
+        loginUserSelector = hiddenUserCandidate;
+        logger.info(`⚠️ No visible input found. Using hidden candidate: ${loginUserSelector}`);
       }
 
       let userFieldVisible = false;
