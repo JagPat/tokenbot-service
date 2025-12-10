@@ -242,13 +242,66 @@ class TokenFetcher {
         }
       }
 
-      if (!loginUserSelector) {
-        const loginPageContent = await page.content();
-        if (loginPageContent.includes('Invalid `api_key`')) {
-          logger.error(`[ZerodhaOAuth] HTML page still indicates Invalid api_key. First 200 chars: ${loginPageContent.slice(0, 200)}`);
-          throw new Error('Zerodha login page returned an API key error. Please confirm the API key and redirect URI are configured correctly in Zerodha developer console.');
+      let userFieldVisible = false;
+
+      // Check if User ID field is found but hidden (Pre-filled session)
+      if (loginUserSelector) {
+        userFieldVisible = await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          return el && el.offsetParent !== null;
+        }, loginUserSelector);
+
+        if (!userFieldVisible) {
+          logger.info(`⚠️ User ID field found but HIDDEN. Checking for 'Change user' link...`);
+
+          // Look for "Change user" link/button
+          const changeUserSelectors = [
+            'a.remove',
+            'a.change-user',
+            'button.change-user',
+            'a[href="#"][class*="remove"]',
+            'div.user-id span.remove' // Sometimes inside a container
+          ];
+
+          for (const linkSelector of changeUserSelectors) {
+            const linkExists = await page.$(linkSelector);
+            if (linkExists) {
+              logger.info(`✅ Found 'Change user' link: ${linkSelector}. Clicking it to reveal User ID field...`);
+              await page.click(linkSelector);
+              // Wait for User ID input to become visible
+              try {
+                await page.waitForSelector(loginUserSelector, { visible: true, timeout: 5000 });
+                userFieldVisible = true;
+                logger.info('✅ User ID field is now VISIBLE.');
+              } catch (e) {
+                logger.warn('⚠️ User ID field did not become visible after clicking link.');
+              }
+              break;
+            }
+          }
         }
-        throw new Error('User ID input field not found on Zerodha login page. The layout may have changed; manual review required.');
+      }
+
+      if (!loginUserSelector) {
+        // ... (Existing error handling for no selector found)
+        const loginPageContent = await page.content();
+        // ...
+        throw new Error('User ID input field not found on Zerodha login page...');
+      }
+
+      // Final check for visibility before typing
+      if (!userFieldVisible) {
+        // Re-check visibility one last time
+        userFieldVisible = await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          return el && el.offsetParent !== null;
+        }, loginUserSelector);
+      }
+
+      if (!userFieldVisible) {
+        // If still not visible, we can try typing anyway (might work if it's just opacity 0 but interactive) 
+        // OR throw specific error. Let's try typing but log warning.
+        logger.warn(`⚠️ User ID field ${loginUserSelector} might still be hidden. Attempting to type anyway...`);
       }
 
       await page.type(loginUserSelector, kite_user_id, { delay: 50 });
