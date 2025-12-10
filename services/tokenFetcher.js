@@ -207,13 +207,15 @@ class TokenFetcher {
         'input[placeholder*="user"]',
         'input[aria-label*="User"]',
         'input[data-testid*="user"]',
-        'input[type="text"]'
+        'input[type="text"]', // Fallback: any text input
+        'input:not([type])'   // Fallback: input with no type (defaults to text)
       ];
 
       let loginUserSelector = null;
       for (const selector of loginUserSelectors) {
         try {
-          await page.waitForSelector(selector, { timeout: 4000 });
+          // Reduced timeout for faster iteration on invalid selectors
+          await page.waitForSelector(selector, { timeout: 2000 });
           const fieldInfo = await page.evaluate(sel => {
             const element = document.querySelector(sel);
             if (!element) return null;
@@ -221,14 +223,19 @@ class TokenFetcher {
               visible: element.offsetParent !== null,
               enabled: !element.disabled,
               tagName: element.tagName,
-              type: element.type || 'text'
+              type: element.type || 'text',
+              id: element.id,
+              placeholder: element.placeholder
             };
           }, selector);
 
           if (fieldInfo?.visible && fieldInfo?.enabled) {
-            loginUserSelector = selector;
-            logger.info(`✅ Using login selector: ${selector}`);
-            break;
+            // Avoid password fields or hidden inputs
+            if (fieldInfo.type !== 'password' && fieldInfo.type !== 'hidden') {
+              loginUserSelector = selector;
+              logger.info(`✅ Using login selector: ${selector} (ID: ${fieldInfo.id}, Placeholder: ${fieldInfo.placeholder})`);
+              break;
+            }
           }
         } catch (selectorError) {
           continue;
@@ -386,9 +393,9 @@ class TokenFetcher {
         // On TOTP page: #userid IS the TOTP field (confirmed from logs)
         totpSelectors = [
           '#userid',                           // Zerodha reuses userid ID for TOTP field! (HIGHEST PRIORITY)
+          'input[type="number"]',              // Common for TOTP
           'input[placeholder*="••••••"]',       // Masked placeholder (from logs)
           'input[type="number"][maxlength="6"]', // Number type with 6 digits (from logs)
-          'input[type="number"]',              // Any number type on TOTP page
           'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete
           'input[placeholder*="TOTP"]',         // Placeholder-based (uppercase)
           'input[placeholder*="Enter TOTP"]',    // Common Zerodha placeholder
@@ -400,6 +407,7 @@ class TokenFetcher {
       } else {
         // On login page: use standard selectors (exclude #userid)
         totpSelectors = [
+          'input[type="number"]',                // Common for TOTP
           'input[autocomplete="one-time-code"]', // Standard TOTP autocomplete
           'input[placeholder*="TOTP"]',          // Placeholder-based (uppercase)
           'input[placeholder*="Enter TOTP"]',    // Common Zerodha placeholder

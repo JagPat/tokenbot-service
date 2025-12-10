@@ -1,7 +1,7 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
-watchPatterns = ["**/*.js", "package.json", "services/**", "routes/**", "config/**"]
+watchPatterns = ["**/*.js", "package.json", "services/**", "routes/**", "config/**", "Dockerfile", "railway.toml"]
 
 [deploy]
 startCommand = "npm start"
