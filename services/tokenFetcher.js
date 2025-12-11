@@ -28,7 +28,15 @@ class TokenFetcher {
         throw new Error('Browser is not connected');
       }
 
-      page = await browser.newPage();
+      try {
+        page = await browser.newPage();
+      } catch (error) {
+        // Browser might have disconnected
+        if (!browser || !browser.isConnected()) {
+          throw new Error('Browser disconnected during page creation');
+        }
+        throw error;
+      }
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
       // CRITICAL: Set up response and request interceptors EARLY to capture callback URL
@@ -897,7 +905,11 @@ class TokenFetcher {
       logger.info(`✅ Request token extracted: ${requestToken.substring(0, 10)}...`);
 
       // Close page but keep browser in pool
-      await page.close();
+      try {
+        await page.close();
+      } catch (closeError) {
+        logger.warn(`Failed to close page: ${closeError.message}`);
+      }
       page = null;
 
       // Step 5: Generate session using KiteConnect
@@ -910,7 +922,7 @@ class TokenFetcher {
 
       // Release browser back to pool before returning
       if (browserInfo) {
-        browserPool.release(browserInfo.id);
+        browserPool.release(browserInfo.id, browserInfo.requestId);
         logger.info(`🔄 Released browser ${browserInfo.id} back to pool`);
       }
 
@@ -938,7 +950,7 @@ class TokenFetcher {
       // 🔥 BROWSER POOL: Release browser back to pool (don't close it)
       if (browserInfo) {
         try {
-          browserPool.release(browserInfo.id);
+          browserPool.release(browserInfo.id, browserInfo.requestId);
           logger.info(`🔄 Released browser ${browserInfo.id} back to pool`);
         } catch (releaseError) {
           logger.warn(`Failed to release browser: ${releaseError.message}`);
