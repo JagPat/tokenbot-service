@@ -31,6 +31,9 @@ class TokenFetcher {
       page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:31',message:'Page created, BEFORE setting up interception',data:{pageCreated:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
       // CRITICAL: Set up response and request interceptors EARLY to capture callback URL
       // Must be set up BEFORE any navigation starts
       let interceptedRequestToken = null;
@@ -38,9 +41,15 @@ class TokenFetcher {
 
       // Enable request interception to stop the backend from consuming the token
       await page.setRequestInterception(true);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:40',message:'Request interception enabled, BEFORE attaching listener',data:{interceptionEnabled:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
 
       // Intercept requests to catch redirect to callback URL (BEFORE backend processes it)
       page.on('request', (request) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:43',message:'Request intercepted',data:{url:request.url().substring(0,100),hasRequestToken:request.url().includes('request_token')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+        // #endregion
         const requestUrl = request.url();
 
         // Check for callback URL
@@ -188,6 +197,9 @@ class TokenFetcher {
       logger.info(`📋 Expected redirect URI: ${redirectUri}`);
       logger.info(`⚠️ NOTE: Redirect URI must be configured in Zerodha developer console to match: ${redirectUri}`);
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:191',message:'BEFORE page.goto() - navigation starting',data:{url:oauthLoginUrl,interceptionSetup:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
       const loginResponse = await page.goto(oauthLoginUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 60000
@@ -928,9 +940,18 @@ class TokenFetcher {
 
       // Cleanup: close page if it exists
       if (page) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:930',message:'BEFORE page.close() in error handler',data:{pageExists:!!page},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+        // #endregion
         try {
           await page.close();
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:933',message:'AFTER page.close() in error handler - SUCCESS',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+          // #endregion
         } catch (closeError) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenFetcher.js:934',message:'page.close() FAILED in error handler',data:{error:closeError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+          // #endregion
           logger.warn(`Failed to close page: ${closeError.message}`);
         }
       }

@@ -49,7 +49,13 @@ class Scheduler {
   }
 
   async refreshAllTokens() {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scheduler.js:51',message:'refreshAllTokens() called',data:{isRunning:this.isRunning},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+    // #endregion
     if (this.isRunning) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scheduler.js:53',message:'refreshAllTokens() skipped - already running',data:{isRunning:this.isRunning},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+      // #endregion
       logger.warn('⚠️ Token refresh already in progress');
       return;
     }
