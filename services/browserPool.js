@@ -156,11 +156,6 @@ class BrowserPool {
       logger.info('✅ Circuit breaker: Moving to CLOSED state');
       this.circuitBreaker.state = 'CLOSED';
       this.circuitBreaker.failures = 0;
-    } else if (this.circuitBreaker.state === 'CLOSED' && this.circuitBreaker.failures > 0) {
-      // FIX: Reset failure counter on success in CLOSED state to allow proper recovery
-      // This prevents failures from accumulating indefinitely
-      this.circuitBreaker.failures = 0;
-      logger.debug('✅ Circuit breaker: Reset failure counter after successful operation');
     }
   }
 
@@ -236,15 +231,7 @@ class BrowserPool {
       // Monitor browser process
       browser.on('disconnected', () => {
         logger.info(`🔌 Browser ${browserInfo.id} disconnected`);
-        // FIX: Only remove if not currently in use (not in activeBrowsers)
-        // If browser is active, mark for removal after release
-        if (!this.activeBrowsers.has(browserInfo.id)) {
-          this.removeBrowser(browserInfo.id);
-        } else {
-          logger.warn(`⚠️ Browser ${browserInfo.id} disconnected while active - will be removed on release`);
-          // Mark browser as disconnected so it won't be reused
-          browserInfo.browser = null;
-        }
+        this.removeBrowser(browserInfo.id);
       });
 
       return browserInfo;
@@ -277,43 +264,20 @@ class BrowserPool {
     }
 
     // Try to reuse existing browser
-    // FIX: Atomic check-and-set using size tracking to prevent race condition
-    for (const browserInfo of this.pool) {
-      const isNotExpired = Date.now() - browserInfo.createdAt < this.maxAge;
-      const isHealthy = browserInfo.browser && browserInfo.browser.isConnected();
-      
-      if (!isNotExpired || !isHealthy) continue;
-      
-      // Atomic check-and-set: Track size before adding to detect if we successfully acquired
-      // This prevents race conditions where multiple requests acquire the same browser
-      if (!this.activeBrowsers.has(browserInfo.id)) {
-        const sizeBefore = this.activeBrowsers.size;
-        this.activeBrowsers.add(browserInfo.id);
-        const sizeAfter = this.activeBrowsers.size;
-        
-        // If size didn't increase, another request already acquired this browser
-        if (sizeAfter > sizeBefore) {
-          // FIX: Verify browser is still connected after acquiring (might have disconnected during race)
-          const stillHealthy = browserInfo.browser && browserInfo.browser.isConnected();
-          if (!stillHealthy) {
-            // Browser disconnected during acquisition, remove it and continue searching
-            this.activeBrowsers.delete(browserInfo.id);
-            logger.warn(`⚠️ Browser ${browserInfo.id} disconnected during acquisition, removing from pool`);
-            continue;
-          }
-          
-          browserInfo.lastUsed = Date.now();
-          browserInfo.useCount++;
-          this.stats.reused++;
-          logger.info(`♻️ Reusing browser ${browserInfo.id} (use count: ${browserInfo.useCount})`);
-          return browserInfo;
-        } else {
-          // Another request acquired it first, continue searching
-          // Note: browserInfo.id is now in activeBrowsers (added by other request), so we don't remove it
-          logger.debug(`⚠️ Browser ${browserInfo.id} was acquired by another request, continuing search`);
-          continue;
-        }
-      }
+    const availableBrowser = this.pool.find(b => {
+      const isIdle = !this.activeBrowsers.has(b.id);
+      const isNotExpired = Date.now() - b.createdAt < this.maxAge;
+      const isHealthy = b.browser && b.browser.isConnected();
+      return isIdle && isNotExpired && isHealthy;
+    });
+
+    if (availableBrowser) {
+      availableBrowser.lastUsed = Date.now();
+      availableBrowser.useCount++;
+      this.activeBrowsers.add(availableBrowser.id);
+      this.stats.reused++;
+      logger.info(`♻️ Reusing browser ${availableBrowser.id} (use count: ${availableBrowser.useCount})`);
+      return availableBrowser;
     }
 
     // Check pool size limit
@@ -324,26 +288,19 @@ class BrowserPool {
       for (let i = 0; i < 10; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // FIX: Atomic check-and-set in wait loop too
-        for (const browserInfo of this.pool) {
-          const isHealthy = browserInfo.browser && browserInfo.browser.isConnected();
-          if (!isHealthy) continue;
-          
-          if (!this.activeBrowsers.has(browserInfo.id)) {
-            const sizeBefore = this.activeBrowsers.size;
-            this.activeBrowsers.add(browserInfo.id);
-            const sizeAfter = this.activeBrowsers.size;
-            
-            // If size increased, we successfully acquired it
-            if (sizeAfter > sizeBefore) {
-              browserInfo.lastUsed = Date.now();
-              browserInfo.useCount++;
-              this.stats.reused++;
-              logger.info(`♻️ Reusing browser ${browserInfo.id} after wait`);
-              return browserInfo;
-            }
-            // Otherwise continue searching
-          }
+        const nowAvailable = this.pool.find(b => {
+          const isIdle = !this.activeBrowsers.has(b.id);
+          const isHealthy = b.browser && b.browser.isConnected();
+          return isIdle && isHealthy;
+        });
+
+        if (nowAvailable) {
+          nowAvailable.lastUsed = Date.now();
+          nowAvailable.useCount++;
+          this.activeBrowsers.add(nowAvailable.id);
+          this.stats.reused++;
+          logger.info(`♻️ Reusing browser ${nowAvailable.id} after wait`);
+          return nowAvailable;
         }
       }
 
@@ -362,33 +319,12 @@ class BrowserPool {
    * Release browser back to pool
    */
   release(browserId) {
-    // FIX: Prevent double-release - if browser is not in activeBrowsers, it's already released
-    if (!this.activeBrowsers.has(browserId)) {
-      logger.debug(`⚠️ Browser ${browserId} is not in activeBrowsers, already released or never acquired`);
-      return;
-    }
-    
     const browserInfo = this.pool.find(b => b.id === browserId);
-    if (!browserInfo) {
-      logger.warn(`⚠️ Browser ${browserId} not found in pool during release`);
-      this.activeBrowsers.delete(browserId); // Clean up anyway
-      return;
+    if (browserInfo) {
+      this.activeBrowsers.delete(browserId);
+      browserInfo.lastUsed = Date.now();
+      logger.debug(`🔄 Released browser ${browserId} back to pool`);
     }
-    
-    // FIX: Verify browser is still connected before releasing
-    // If disconnected, remove it instead of releasing (async, but fire-and-forget is OK here)
-    if (!browserInfo.browser || !browserInfo.browser.isConnected()) {
-      logger.warn(`⚠️ Browser ${browserId} is disconnected, removing from pool instead of releasing`);
-      // Remove browser asynchronously (fire-and-forget)
-      this.removeBrowser(browserId).catch(err => {
-        logger.error(`Failed to remove disconnected browser ${browserId}: ${err.message}`);
-      });
-      return;
-    }
-    
-    this.activeBrowsers.delete(browserId);
-    browserInfo.lastUsed = Date.now();
-    logger.debug(`🔄 Released browser ${browserId} back to pool`);
   }
 
   /**
