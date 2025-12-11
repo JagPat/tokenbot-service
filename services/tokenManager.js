@@ -70,31 +70,18 @@ class TokenManager {
   async storeToken(userId, tokenData) {
     logger.info(`💾 Storing token for user: ${userId}`);
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:70',message:'storeToken() started',data:{userId,hasTransaction:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
-    
     // FIX: Wrap operations in transaction to prevent race conditions
     const client = await db.getClient();
     
     try {
       await client.query('BEGIN');
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:76',message:'BEFORE UPDATE (invalidate old tokens) - IN TRANSACTION',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       // Invalidate old tokens
       await client.query(
         `UPDATE kite_tokens SET is_valid = false WHERE user_id = $1`,
         [userId]
       );
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:82',message:'AFTER UPDATE (invalidate old tokens) - IN TRANSACTION',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:85',message:'BEFORE INSERT (new token) - IN TRANSACTION',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       // Insert new token (updated_at will be set by default or trigger)
       await client.query(`
         INSERT INTO kite_tokens (user_id, access_token, public_token, login_time, expires_at, generation_method, updated_at)
@@ -106,9 +93,6 @@ class TokenManager {
         tokenData.login_time,
         tokenData.expires_at
       ]);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:95',message:'AFTER INSERT (new token) - IN TRANSACTION',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       
       // Update last_used timestamp
       await client.query(

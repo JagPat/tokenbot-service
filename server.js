@@ -171,9 +171,6 @@ async function startServer() {
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server.js:172',message:'SIGTERM received',data:{willCallBrowserPoolShutdown:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   logger.info('SIGTERM received. Shutting down gracefully...');
   
   // FIX: Shutdown browser pool before closing database
@@ -184,16 +181,10 @@ process.on('SIGTERM', async () => {
   }
   
   await db.end();
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server.js:180',message:'BEFORE process.exit(0)',data:{dbEnded:true,browserPoolShutdownCalled:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server.js:183',message:'SIGINT received',data:{willCallBrowserPoolShutdown:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   logger.info('SIGINT received. Shutting down gracefully...');
   
   // FIX: Shutdown browser pool before closing database
@@ -204,9 +195,6 @@ process.on('SIGINT', async () => {
   }
   
   await db.end();
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server.js:195',message:'BEFORE process.exit(0)',data:{dbEnded:true,browserPoolShutdownCalled:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   process.exit(0);
 });
 

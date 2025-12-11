@@ -139,9 +139,6 @@ class BrowserPool {
    * Record circuit breaker failure
    */
   recordFailure() {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:141',message:'BEFORE recordFailure',data:{state:this.circuitBreaker.state,failures:this.circuitBreaker.failures},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     this.circuitBreaker.failures++;
     this.circuitBreaker.lastFailure = Date.now();
 
@@ -149,18 +146,12 @@ class BrowserPool {
       this.circuitBreaker.state = 'OPEN';
       logger.error(`🚫 Circuit breaker: OPENED after ${this.circuitBreaker.failures} failures`);
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:148',message:'AFTER recordFailure',data:{state:this.circuitBreaker.state,failures:this.circuitBreaker.failures},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
   }
 
   /**
    * Record circuit breaker success
    */
   recordSuccess() {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:154',message:'BEFORE recordSuccess',data:{state:this.circuitBreaker.state,failures:this.circuitBreaker.failures},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     if (this.circuitBreaker.state === 'HALF_OPEN') {
       logger.info('✅ Circuit breaker: Moving to CLOSED state');
       this.circuitBreaker.state = 'CLOSED';
@@ -171,9 +162,6 @@ class BrowserPool {
       this.circuitBreaker.failures = 0;
       logger.debug('✅ Circuit breaker: Reset failure counter after successful operation');
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:160',message:'AFTER recordSuccess',data:{state:this.circuitBreaker.state,failures:this.circuitBreaker.failures,wasHalfOpen:this.circuitBreaker.state === 'CLOSED'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
   }
 
   /**
@@ -247,9 +235,6 @@ class BrowserPool {
 
       // Monitor browser process
       browser.on('disconnected', () => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:232',message:'Browser disconnected event',data:{browserId:browserInfo.id,isInActiveBrowsers:this.activeBrowsers.has(browserInfo.id),activeBrowsers:Array.from(this.activeBrowsers)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         logger.info(`🔌 Browser ${browserInfo.id} disconnected`);
         // FIX: Only remove if not currently in use (not in activeBrowsers)
         // If browser is active, mark for removal after release
@@ -286,9 +271,6 @@ class BrowserPool {
    * Get a browser from pool or create new one
    */
   async acquire() {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:260',message:'acquire() called',data:{poolSize:this.pool.length,activeBrowsers:Array.from(this.activeBrowsers),maxPoolSize:this.maxPoolSize},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     // Check circuit breaker first
     if (this.checkCircuitBreaker()) {
       throw new Error('Browser pool unavailable. System recovering from failures.');
@@ -306,19 +288,20 @@ class BrowserPool {
       // This prevents race conditions where multiple requests acquire the same browser
       if (!this.activeBrowsers.has(browserInfo.id)) {
         const sizeBefore = this.activeBrowsers.size;
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:305',message:'Atomic acquire - BEFORE adding to activeBrowsers',data:{browserId:browserInfo.id,activeBrowsersBefore:Array.from(this.activeBrowsers),sizeBefore},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
         this.activeBrowsers.add(browserInfo.id);
         const sizeAfter = this.activeBrowsers.size;
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:312',message:'Atomic acquire - AFTER adding to activeBrowsers',data:{browserId:browserInfo.id,activeBrowsersAfter:Array.from(this.activeBrowsers),sizeBefore,sizeAfter,acquired:sizeAfter > sizeBefore},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
         // If size didn't increase, another request already acquired this browser
         if (sizeAfter > sizeBefore) {
+          // FIX: Verify browser is still connected after acquiring (might have disconnected during race)
+          const stillHealthy = browserInfo.browser && browserInfo.browser.isConnected();
+          if (!stillHealthy) {
+            // Browser disconnected during acquisition, remove it and continue searching
+            this.activeBrowsers.delete(browserInfo.id);
+            logger.warn(`⚠️ Browser ${browserInfo.id} disconnected during acquisition, removing from pool`);
+            continue;
+          }
+          
           browserInfo.lastUsed = Date.now();
           browserInfo.useCount++;
           this.stats.reused++;
@@ -326,6 +309,7 @@ class BrowserPool {
           return browserInfo;
         } else {
           // Another request acquired it first, continue searching
+          // Note: browserInfo.id is now in activeBrowsers (added by other request), so we don't remove it
           logger.debug(`⚠️ Browser ${browserInfo.id} was acquired by another request, continuing search`);
           continue;
         }
@@ -378,32 +362,39 @@ class BrowserPool {
    * Release browser back to pool
    */
   release(browserId) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:321',message:'release() called',data:{browserId,browserExists:!!this.pool.find(b => b.id === browserId),isConnected:this.pool.find(b => b.id === browserId)?.browser?.isConnected()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-    const browserInfo = this.pool.find(b => b.id === browserId);
-    if (browserInfo) {
-      // FIX: Verify browser is still connected before releasing
-      // If disconnected, remove it instead of releasing
-      if (!browserInfo.browser || !browserInfo.browser.isConnected()) {
-        logger.warn(`⚠️ Browser ${browserId} is disconnected, removing from pool instead of releasing`);
-        this.removeBrowser(browserId);
-        return;
-      }
-      
-      this.activeBrowsers.delete(browserId);
-      browserInfo.lastUsed = Date.now();
-      logger.debug(`🔄 Released browser ${browserId} back to pool`);
+    // FIX: Prevent double-release - if browser is not in activeBrowsers, it's already released
+    if (!this.activeBrowsers.has(browserId)) {
+      logger.debug(`⚠️ Browser ${browserId} is not in activeBrowsers, already released or never acquired`);
+      return;
     }
+    
+    const browserInfo = this.pool.find(b => b.id === browserId);
+    if (!browserInfo) {
+      logger.warn(`⚠️ Browser ${browserId} not found in pool during release`);
+      this.activeBrowsers.delete(browserId); // Clean up anyway
+      return;
+    }
+    
+    // FIX: Verify browser is still connected before releasing
+    // If disconnected, remove it instead of releasing (async, but fire-and-forget is OK here)
+    if (!browserInfo.browser || !browserInfo.browser.isConnected()) {
+      logger.warn(`⚠️ Browser ${browserId} is disconnected, removing from pool instead of releasing`);
+      // Remove browser asynchronously (fire-and-forget)
+      this.removeBrowser(browserId).catch(err => {
+        logger.error(`Failed to remove disconnected browser ${browserId}: ${err.message}`);
+      });
+      return;
+    }
+    
+    this.activeBrowsers.delete(browserId);
+    browserInfo.lastUsed = Date.now();
+    logger.debug(`🔄 Released browser ${browserId} back to pool`);
   }
 
   /**
    * Remove browser from pool
    */
   async removeBrowser(browserId) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:333',message:'removeBrowser() called',data:{browserId,isInActiveBrowsers:this.activeBrowsers.has(browserId),activeBrowsers:Array.from(this.activeBrowsers)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     const index = this.pool.findIndex(b => b.id === browserId);
     if (index !== -1) {
       const browserInfo = this.pool[index];
@@ -478,9 +469,6 @@ class BrowserPool {
    * Close all browsers and cleanup
    */
   async shutdown() {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'browserPool.js:407',message:'browserPool.shutdown() called',data:{poolSize:this.pool.length,activeBrowsers:this.activeBrowsers.size},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     logger.info('🛑 Shutting down browser pool...');
 
     if (this.cleanupInterval) {
