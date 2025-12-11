@@ -39,7 +39,13 @@ class BrowserPool {
     };
 
     // Start cleanup interval
-    this.cleanupInterval = setInterval(() => this.cleanup(), 60000); // Every minute
+    this.cleanupInterval = setInterval(async () => {
+      try {
+        await this.cleanup();
+      } catch (error) {
+        logger.error(`Cleanup interval error: ${error.message}`, error);
+      }
+    }, 60000); // Every minute
 
     // Monitor memory pressure
     this.memoryCheckInterval = setInterval(() => this.checkMemoryPressure(), 30000); // Every 30 seconds
@@ -351,11 +357,13 @@ class BrowserPool {
     }
 
     // Create new browser
+    // Create new browser
     const browserInfo = await this.createBrowser();
-    this.pool.push(browserInfo);
 
-    // Atomic lock
+    // Fix Race Condition: Lock BEFORE adding to pool
+    // This ensures no other request can acquire it via findAndLock() 
     this.activeBrowsers.set(browserInfo.id, requestId);
+    this.pool.push(browserInfo);
 
     return {
       ...browserInfo,

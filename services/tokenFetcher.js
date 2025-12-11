@@ -48,128 +48,143 @@ class TokenFetcher {
       await page.setRequestInterception(true);
 
       // Intercept requests to catch redirect to callback URL (BEFORE backend processes it)
+      // Intercept requests to catch redirect to callback URL (BEFORE backend processes it)
       page.on('request', (request) => {
-        const requestUrl = request.url();
+        try {
+          const requestUrl = request.url();
 
-        // Check for callback URL
-        if (requestUrl.includes('/api/modules/auth/broker/callback') && requestUrl.includes('request_token')) {
-          logger.info(`🎯 Intercepted callback REQUEST: ${requestUrl}`);
+          // Check for callback URL
+          if (requestUrl.includes('/api/modules/auth/broker/callback') && requestUrl.includes('request_token')) {
+            logger.info(`🎯 Intercepted callback REQUEST: ${requestUrl}`);
 
-          // Extract request_token from request URL
-          try {
-            const urlObj = new URL(requestUrl);
-            let token = urlObj.searchParams.get('request_token');
+            // Extract request_token from request URL
+            try {
+              const urlObj = new URL(requestUrl);
+              let token = urlObj.searchParams.get('request_token');
 
-            if (!token && urlObj.hash) {
-              const hashParams = new URLSearchParams(urlObj.hash.substring(1));
-              token = hashParams.get('request_token');
-            }
-
-            if (!token) {
-              const tokenMatch = requestUrl.match(/request_token[=:]([^&?#\s]+)/i);
-              if (tokenMatch) {
-                token = tokenMatch[1];
+              if (!token && urlObj.hash) {
+                const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+                token = hashParams.get('request_token');
               }
-            }
 
-            if (token) {
-              interceptedRequestToken = token;
-              interceptedCallbackUrl = requestUrl;
-              logger.info(`✅✅✅ Request token EXTRACTED from REQUEST: ${token.substring(0, 10)}...`);
+              if (!token) {
+                const tokenMatch = requestUrl.match(/request_token[=:]([^&?#\s]+)/i);
+                if (tokenMatch) {
+                  token = tokenMatch[1];
+                }
+              }
 
-              // CRITICAL: Abort the request so the backend (Chanakya Web) doesn't receive/consume the token!
-              logger.info(`🛑 ABORTING callback request to prevent backend consumption.`);
-              request.abort('blockedbyclient');
-              return;
+              if (token) {
+                interceptedRequestToken = token;
+                interceptedCallbackUrl = requestUrl;
+                logger.info(`✅✅✅ Request token EXTRACTED from REQUEST: ${token.substring(0, 10)}...`);
+
+                // CRITICAL: Abort the request so the backend (Chanakya Web) doesn't receive/consume the token!
+                logger.info(`🛑 ABORTING callback request to prevent backend consumption.`);
+                request.abort('blockedbyclient');
+                return;
+              }
+            } catch (urlError) {
+              logger.warn(`⚠️ Error parsing intercepted request URL: ${urlError.message}`);
             }
-          } catch (urlError) {
-            logger.warn(`⚠️ Error parsing intercepted request URL: ${urlError.message}`);
           }
-        }
 
-        // Continue all other requests (or if extraction failed)
-        // Safe check to ensure we don't crash if request is already handled
-        if (!request.isInterceptResolutionHandled()) {
-          request.continue();
+          // Continue all other requests (or if extraction failed)
+          // Safe check to ensure we don't crash if request is already handled
+          if (!request.isInterceptResolutionHandled()) {
+            request.continue();
+          }
+        } catch (error) {
+          // Page might be closed or request already handled
+          try {
+            if (!request.isInterceptResolutionHandled()) {
+              request.continue();
+            }
+          } catch (ign) { /* ignore */ }
         }
       });
 
       // Intercept responses to catch callback URL (captures both GET redirects and POST responses)
+      // Intercept responses to catch callback URL (captures both GET redirects and POST responses)
       page.on('response', async (response) => {
-        const responseUrl = response.url();
-        const status = response.status();
+        try {
+          const responseUrl = response.url();
+          const status = response.status();
 
-        // Check if this is the callback URL (even without request_token in URL - might be in response body)
-        if (responseUrl.includes('/api/modules/auth/broker/callback')) {
-          logger.info(`🎯 Intercepted callback RESPONSE: ${responseUrl} (Status: ${status})`);
+          // Check if this is the callback URL (even without request_token in URL - might be in response body)
+          if (responseUrl.includes('/api/modules/auth/broker/callback')) {
+            logger.info(`🎯 Intercepted callback RESPONSE: ${responseUrl} (Status: ${status})`);
 
-          // Extract request_token from response URL
-          try {
-            const urlObj = new URL(responseUrl);
-            let token = urlObj.searchParams.get('request_token');
+            // Extract request_token from response URL
+            try {
+              const urlObj = new URL(responseUrl);
+              let token = urlObj.searchParams.get('request_token');
 
-            if (!token && urlObj.hash) {
-              const hashParams = new URLSearchParams(urlObj.hash.substring(1));
-              token = hashParams.get('request_token');
-            }
-
-            if (!token) {
-              const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
-              if (tokenMatch) {
-                token = tokenMatch[1];
+              if (!token && urlObj.hash) {
+                const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+                token = hashParams.get('request_token');
               }
-            }
 
-            // If not in URL, try response body (for POST requests)
-            if (!token && status === 200) {
-              try {
-                const responseBody = await response.text();
-                const bodyTokenMatch = responseBody.match(/request_token["']?\s*[=:]\s*["']?([^"'\s&]+)/i);
-                if (bodyTokenMatch) {
-                  token = bodyTokenMatch[1];
-                  logger.info(`✅ Found request_token in response body`);
+              if (!token) {
+                const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
+                if (tokenMatch) {
+                  token = tokenMatch[1];
                 }
-              } catch (bodyError) {
-                // Ignore - response might not be text
               }
-            }
 
-            if (token && !interceptedRequestToken) {
-              interceptedRequestToken = token;
-              interceptedCallbackUrl = responseUrl;
-              logger.info(`✅✅✅ Request token EXTRACTED from RESPONSE: ${token.substring(0, 10)}...`);
-            }
-          } catch (urlError) {
-            logger.warn(`⚠️ Error parsing intercepted response URL: ${urlError.message}`);
-          }
-        } else if (responseUrl.includes('request_token')) {
-          // Also catch any URL with request_token (even if not callback path)
-          logger.info(`🎯 Intercepted URL with request_token: ${responseUrl}`);
-
-          try {
-            const urlObj = new URL(responseUrl);
-            let token = urlObj.searchParams.get('request_token');
-
-            if (!token && urlObj.hash) {
-              const hashParams = new URLSearchParams(urlObj.hash.substring(1));
-              token = hashParams.get('request_token');
-            }
-
-            if (!token) {
-              const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
-              if (tokenMatch) {
-                token = tokenMatch[1];
+              // If not in URL, try response body (for POST requests)
+              if (!token && status === 200) {
+                try {
+                  const responseBody = await response.text();
+                  const bodyTokenMatch = responseBody.match(/request_token["']?\s*[=:]\s*["']?([^"'\s&]+)/i);
+                  if (bodyTokenMatch) {
+                    token = bodyTokenMatch[1];
+                    logger.info(`✅ Found request_token in response body`);
+                  }
+                } catch (bodyError) {
+                  // Ignore - response might not be text
+                }
               }
-            }
 
-            if (token && !interceptedRequestToken) {
-              interceptedRequestToken = token;
-              interceptedCallbackUrl = responseUrl;
-              logger.info(`✅✅✅ Request token EXTRACTED from URL: ${token.substring(0, 10)}...`);
+              if (token && !interceptedRequestToken) {
+                interceptedRequestToken = token;
+                interceptedCallbackUrl = responseUrl;
+                logger.info(`✅✅✅ Request token EXTRACTED from RESPONSE: ${token.substring(0, 10)}...`);
+              }
+            } catch (urlError) {
+              logger.warn(`⚠️ Error parsing intercepted response URL: ${urlError.message}`);
             }
-          } catch (urlError) {
-            logger.warn(`⚠️ Error parsing intercepted URL: ${urlError.message}`);
+          } else if (responseUrl.includes('request_token')) {
+            // Also catch any URL with request_token (even if not callback path)
+            logger.info(`🎯 Intercepted URL with request_token: ${responseUrl}`);
+
+            try {
+              const urlObj = new URL(responseUrl);
+              let token = urlObj.searchParams.get('request_token');
+
+              if (!token && urlObj.hash) {
+                const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+                token = hashParams.get('request_token');
+              }
+
+              if (!token) {
+                const tokenMatch = responseUrl.match(/request_token[=:]([^&?#\s]+)/i);
+                if (tokenMatch) {
+                  token = tokenMatch[1];
+                }
+              }
+
+              if (token && !interceptedRequestToken) {
+                interceptedRequestToken = token;
+                interceptedCallbackUrl = responseUrl;
+                logger.info(`✅✅✅ Request token EXTRACTED from URL: ${token.substring(0, 10)}...`);
+              }
+            } catch (urlError) {
+              logger.warn(`⚠️ Error parsing intercepted URL: ${urlError.message}`);
+            }
           }
+        } catch (error) {
+          // Ignore errors from closed pages
         }
       });
 
