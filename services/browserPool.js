@@ -97,7 +97,8 @@ class BrowserPool {
       '--disable-speech-api',
       '--disable-web-security', // Only for internal automation
       '--disable-features=IsolateOrigins,site-per-process',
-      '--js-flags=--max-old-space-size=128' // Limit JS heap
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--js-flags=--max-old-space-size=512' // Increased from 128 to 512 for stability
     ];
   }
 
