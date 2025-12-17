@@ -8,6 +8,7 @@ const db = require('./config/database');
 const encryptor = require('./services/encryptor');
 const scheduler = require('./services/scheduler');
 const browserPool = require('./services/browserPool');
+const envCredentialSync = require('./services/envCredentialSync');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 // Import routes
@@ -129,6 +130,11 @@ async function startServer() {
         logger.warn('⚠️ DATABASE_URL not set, skipping database connection');
       }
 
+      // Sync credentials from Environment (if present)
+      if (process.env.DATABASE_URL) {
+        await envCredentialSync.sync();
+      }
+
       // Test encryption (with fallback)
       if (process.env.ENCRYPTION_KEY) {
         try {
@@ -172,28 +178,28 @@ async function startServer() {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received. Shutting down gracefully...');
-  
+
   // FIX: Shutdown browser pool before closing database
   try {
     await browserPool.shutdown();
   } catch (error) {
     logger.error(`Error shutting down browser pool: ${error.message}`);
   }
-  
+
   await db.end();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   logger.info('SIGINT received. Shutting down gracefully...');
-  
+
   // FIX: Shutdown browser pool before closing database
   try {
     await browserPool.shutdown();
   } catch (error) {
     logger.error(`Error shutting down browser pool: ${error.message}`);
   }
-  
+
   await db.end();
   process.exit(0);
 });
