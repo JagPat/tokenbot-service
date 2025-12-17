@@ -23,10 +23,54 @@ class Scheduler {
     logger.info('✅ [Scheduler] Daily token refresh scheduled for 8:30 AM IST');
     logger.info(`📅 [Scheduler] Next run: ${this.getNextRunTime()}`);
 
-    // Startup Check: If it's between 8:30 AM and 3:30 PM, and we just started, 
-    // we might want to ensure we have a token.
-    // However, forcing it on every restart can be risky (OTP spam).
-    // Better to just rely on Cron or manual trigger.
+    // Startup Check: If it's between 8:30 AM and 3:30 PM, and we don't have a valid token
+    // trigger a refresh. This handles the "server down during 8:30 AM" case.
+    this._runStartupCheck();
+  }
+
+  async _runStartupCheck() {
+    try {
+      // Get current time in IST
+      const now = new Date();
+      const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const hours = istTime.getHours();
+      const minutes = istTime.getMinutes();
+
+      // Market hours check (approx 8:30 AM to 3:30 PM)
+      const isMarketHours = (hours > 8 || (hours === 8 && minutes >= 30)) && hours < 16;
+
+      if (isMarketHours) {
+        logger.info('🔍 [Scheduler] Service started during market hours. Checking for valid token...');
+
+        // Check for default user
+        const needsRefresh = await this._checkIfTokenNeeded('default');
+
+        if (needsRefresh) {
+          logger.warn('⚠️ [Scheduler] No valid token found during market hours! Triggering immediate refresh.');
+          await this.refreshAllTokens();
+        } else {
+          logger.info('✅ [Scheduler] Valid token exists. No immediate refresh needed.');
+        }
+      }
+    } catch (error) {
+      logger.error(`❌ [Scheduler] Startup check failed: ${error.message}`);
+    }
+  }
+
+  async _checkIfTokenNeeded(userId) {
+    try {
+      const token = await tokenManager.getValidToken(userId);
+      // specific logic: if no token OR token expires in < 1 hour
+      if (!token) return true;
+
+      const expiresAt = new Date(token.expires_at);
+      const now = new Date();
+      const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
+
+      return hoursUntilExpiry < 1;
+    } catch (e) {
+      return true; // fail safe: try to refresh
+    }
   }
 
   getNextRunTime() {
