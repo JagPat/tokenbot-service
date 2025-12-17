@@ -59,6 +59,13 @@ class EnvironmentCredentialSync {
                 encrypted.api_secret
             ]);
 
+            // 4. INVALIDATE EXISTING TOKEN
+            // This is crucial: We just changed credentials (potentially), so the old token 
+            // is likely invalid or mismatched. We must delete it so the Scheduler
+            // sees "No Token" and forces a fresh login immediately.
+            await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [botUserId]);
+            logger.info(`🗑️ [EnvSync] Invalidated/Deleted old access token for user: ${botUserId} to force refresh.`);
+
             logger.info(`✅ [EnvSync] Credentials successfully synced/updated from environment variables for user: ${botUserId}`);
 
         } catch (error) {
