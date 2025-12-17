@@ -31,10 +31,44 @@ class EnvironmentCredentialSync {
                 api_secret: encryptor.encrypt(apiSecret)
             };
 
-            // 3. Upsert into database
-            // We use 'default' as the user_id for the primary bot user
             const botUserId = 'default';
 
+            // 3. CHECK if sync is needed (Prevent Crash Loops)
+            // Fetch existing credentials
+            const existing = await db.query(
+                `SELECT * FROM kite_user_credentials WHERE user_id = $1`,
+                [botUserId]
+            );
+
+            let needsUpdate = true;
+
+            if (existing.rows.length > 0) {
+                const creds = existing.rows[0];
+                try {
+                    // Decrypt stored API Key to compare
+                    const storedApiKey = encryptor.decrypt(creds.encrypted_api_key);
+                    const storedUserId = creds.kite_user_id;
+
+                    // If critical identity fields match, we assume it's synced.
+                    // Comparing everything is safer but more expensive.
+                    // We compare UserID and API Key as primary indicators.
+                    if (storedUserId === userId && storedApiKey === apiKey) {
+                        needsUpdate = false;
+                        logger.info('✅ [EnvSync] Credentials already match environment. Skipping update & token invalidation.');
+                    }
+                } catch (e) {
+                    logger.warn('⚠️ [EnvSync] Failed to compare existing credentials (decryption error?), forcing update.');
+                    needsUpdate = true;
+                }
+            }
+
+            if (!needsUpdate) {
+                return;
+            }
+
+            logger.info('🔄 [EnvSync] Difference detected or new setup. Syncing credentials & invalidating token...');
+
+            // 4. Upsert into database
             await db.query(`
         INSERT INTO kite_user_credentials (
           user_id, kite_user_id, encrypted_password, encrypted_totp_secret,
