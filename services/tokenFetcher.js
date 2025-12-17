@@ -44,7 +44,7 @@ class TokenFetcher {
         const requestUrl = request.url();
 
         // Check for callback URL
-        if (requestUrl.includes('/api/modules/auth/broker/callback') && requestUrl.includes('request_token')) {
+        if (requestUrl.includes('/api/auth/callback') && requestUrl.includes('request_token')) {
           logger.info(`🎯 Intercepted callback REQUEST: ${requestUrl}`);
 
           // Extract request_token from request URL
@@ -92,7 +92,7 @@ class TokenFetcher {
         const status = response.status();
 
         // Check if this is the callback URL (even without request_token in URL - might be in response body)
-        if (responseUrl.includes('/api/modules/auth/broker/callback')) {
+        if (responseUrl.includes('/api/auth/callback')) {
           logger.info(`🎯 Intercepted callback RESPONSE: ${responseUrl} (Status: ${status})`);
 
           // Extract request_token from response URL
@@ -170,7 +170,7 @@ class TokenFetcher {
       // Regular login redirects to dashboard, but OAuth login redirects to callback URL with request_token
       // IMPORTANT: The redirect URI must match EXACTLY what's configured in Zerodha developer console
       const redirectUri = process.env.ZERODHA_REDIRECT_URL ||
-        'https://quantumtrade-backend.up.railway.app/api/modules/auth/broker/callback';
+        'https://quantumtrade-backend.up.railway.app/api/auth/callback';
 
       // Generate OAuth login URL with API key (v=3 is the API version)
       // NOTE: Zerodha uses the redirect_uri configured in developer console, not passed in URL
