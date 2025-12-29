@@ -228,5 +228,93 @@ router.patch('/toggle', authenticateUser, async (req, res, next) => {
   }
 });
 
+/**
+ * PATCH /api/credentials/api-key
+ * Update only the API key and/or API secret (partial update)
+ * Allows web app to sync API key without needing all credentials
+ * Service-to-service authentication only
+ */
+router.patch('/api-key', async (req, res, next) => {
+  try {
+    // Service-to-service authentication (no user auth required)
+    const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+    const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
+    
+    if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized service call'
+      });
+    }
+
+    const { user_id = 'default', api_key, api_secret } = req.body;
+    
+    if (!api_key) {
+      return res.status(400).json({
+        success: false,
+        error: 'api_key is required'
+      });
+    }
+
+    logger.info(`🔄 API key sync requested for user: ${user_id}`);
+
+    // Check if credentials exist
+    const existing = await db.query(
+      `SELECT user_id FROM kite_user_credentials WHERE user_id = $1`,
+      [user_id]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Credentials not found. Please create full credentials first via POST /api/credentials'
+      });
+    }
+
+    // Encrypt API key (and optionally API secret)
+    const encrypted = {
+      api_key: encryptor.encrypt(api_key),
+      ...(api_secret && { api_secret: encryptor.encrypt(api_secret) })
+    };
+
+    // Build update query dynamically
+    const updateFields = ['encrypted_api_key = $1'];
+    const updateValues = [encrypted.api_key];
+    let paramIndex = 2;
+
+    if (api_secret) {
+      updateFields.push(`encrypted_api_secret = $${paramIndex}`);
+      updateValues.push(encrypted.api_secret);
+      paramIndex++;
+    }
+
+    updateFields.push('updated_at = NOW()');
+    updateValues.push(user_id);
+
+    const result = await db.query(`
+      UPDATE kite_user_credentials
+      SET ${updateFields.join(', ')}
+      WHERE user_id = $${paramIndex}
+      RETURNING user_id, kite_user_id, is_active
+    `, updateValues);
+
+    // Invalidate existing tokens since API key changed
+    await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [user_id]);
+    logger.info(`🗑️ Invalidated tokens after API key update for user: ${user_id}`);
+
+    logger.info(`✅ API key updated successfully for user: ${user_id}`);
+    
+    res.json({
+      success: true,
+      message: 'API key updated successfully. Tokens have been invalidated and will be regenerated.',
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    logger.error('Error updating API key:', error);
+    next(error);
+  }
+});
+
 module.exports = router;
 
