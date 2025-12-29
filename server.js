@@ -8,7 +8,7 @@ const db = require('./config/database');
 const encryptor = require('./services/encryptor');
 const scheduler = require('./services/scheduler');
 const browserPool = require('./services/browserPool');
-const envCredentialSync = require('./services/envCredentialSync');
+// const envCredentialSync = require('./services/envCredentialSync'); // REMOVED: Credentials come from database only (original design)
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 // Import routes
@@ -130,10 +130,9 @@ async function startServer() {
         logger.warn('⚠️ DATABASE_URL not set, skipping database connection');
       }
 
-      // Sync credentials from Environment (if present)
-      if (process.env.DATABASE_URL) {
-        await envCredentialSync.sync();
-      }
+      // Credentials come from database only (original design)
+      // Database is the single source of truth. Credentials are stored via API endpoints.
+      // Environment variable sync was removed to prevent overwriting database credentials.
 
       // Test encryption (with fallback)
       if (process.env.ENCRYPTION_KEY) {
