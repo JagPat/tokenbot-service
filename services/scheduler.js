@@ -121,22 +121,38 @@ class Scheduler {
       };
 
       for (const user of users) {
-        try {
-          logger.info(`🔄 Processing user: ${user.user_id} (${user.kite_user_id})`);
-          await tokenManager.refreshTokenForUser(user.user_id);
-          results.success.push(user.user_id);
-          logger.info(`✅ Success: ${user.user_id}`);
-        } catch (error) {
-          results.failed.push({
-            user_id: user.user_id,
-            kite_user_id: user.kite_user_id,
-            error: error.message
-          });
-          logger.error(`❌ Failed: ${user.user_id} - ${error.message}`);
+        const maxRetries = 3;
+        let attempt = 0;
+        let success = false;
+
+        while (attempt < maxRetries && !success) {
+          attempt++;
+          try {
+            logger.info(`🔄 Processing user: ${user.user_id} (${user.kite_user_id}) [attempt ${attempt}/${maxRetries}]`);
+            await tokenManager.refreshTokenForUser(user.user_id);
+            results.success.push(user.user_id);
+            logger.info(`✅ Success: ${user.user_id}`);
+            success = true;
+          } catch (error) {
+            if (error.message.includes('Browser pool exhausted') && attempt < maxRetries) {
+              logger.warn(`⏳ Pool exhausted for ${user.user_id}, waiting 30s before retry (attempt ${attempt}/${maxRetries})...`);
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            } else {
+              results.failed.push({
+                user_id: user.user_id,
+                kite_user_id: user.kite_user_id,
+                error: error.message
+              });
+              logger.error(`❌ Failed: ${user.user_id} - ${error.message}`);
+              break;
+            }
+          }
         }
 
-        // Small delay between users to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Delay between users to avoid rate limiting (only if successful)
+        if (success) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
       }
 
       const duration = Date.now() - startTime;

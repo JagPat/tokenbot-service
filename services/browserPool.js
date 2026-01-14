@@ -11,7 +11,7 @@ const crypto = require('crypto');
 
 class BrowserPool {
   constructor(options = {}) {
-    this.maxPoolSize = parseInt(options.maxPoolSize) || 1; // Start with 1, Railway has memory constraints
+    this.maxPoolSize = parseInt(options.maxPoolSize) || 2; // Increased to 2 for parallel operations
     this.idleTimeout = parseInt(options.idleTimeout) || 300000; // 5 minutes idle timeout
     this.maxAge = parseInt(options.maxAge) || 1800000; // 30 minutes max age
 
@@ -337,8 +337,8 @@ class BrowserPool {
     if (this.pool.length >= this.maxPoolSize) {
       logger.warn(`⚠️ Pool size limit reached (${this.maxPoolSize}), waiting for available browser...`);
 
-      // Wait up to 10 seconds for a browser to become available
-      for (let i = 0; i < 10; i++) {
+      // Wait up to 60 seconds for a browser to become available
+      for (let i = 0; i < 60; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         // Re-check for available browser using atomic helper
@@ -540,7 +540,7 @@ class BrowserPool {
 
 // Singleton instance
 const browserPool = new BrowserPool({
-  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '1'), // Start with 1 for Railway
+  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '2'), // Increased to 2 for parallel operations
   idleTimeout: parseInt(process.env.BROWSER_IDLE_TIMEOUT || '300000'), // 5 minutes
   maxAge: parseInt(process.env.BROWSER_MAX_AGE || '1800000') // 30 minutes
 });
