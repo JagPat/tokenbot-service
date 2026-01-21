@@ -221,8 +221,8 @@ class BrowserPool {
       browser = await puppeteer.launch({
         headless: true,
         executablePath: executablePath, // CRITICAL: Explicitly set Chrome path
-        protocolTimeout: 120000,
-        timeout: 90000,
+        protocolTimeout: 240000, // Increased to 4 minutes for slow startup
+        timeout: 180000, // Increased to 3 minutes
         args: args,
         ignoreHTTPSErrors: true,
         dumpio: true, // Output Chrome logs to stdout for debugging
@@ -540,7 +540,7 @@ class BrowserPool {
 
 // Singleton instance
 const browserPool = new BrowserPool({
-  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '2'), // Increased to 2 for parallel operations
+  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '1'), // Reduced to 1 for Railway stability
   idleTimeout: parseInt(process.env.BROWSER_IDLE_TIMEOUT || '300000'), // 5 minutes
   maxAge: parseInt(process.env.BROWSER_MAX_AGE || '1800000') // 30 minutes
 });
