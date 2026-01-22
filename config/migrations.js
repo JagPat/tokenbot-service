@@ -183,7 +183,64 @@ class MigrationRunner {
     try {
       logger.info('🔄 Running essential database migrations (inline)...');
 
-      // Create stored_tokens table
+      // 1. Create kite_user_credentials table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS kite_user_credentials (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) NOT NULL UNIQUE,
+          kite_user_id VARCHAR(100) NOT NULL,
+          encrypted_password TEXT NOT NULL,
+          encrypted_totp_secret TEXT NOT NULL,
+          encrypted_api_key TEXT NOT NULL,
+          encrypted_api_secret TEXT NOT NULL,
+          is_active BOOLEAN DEFAULT true,
+          auto_refresh_enabled BOOLEAN DEFAULT true,
+          last_used TIMESTAMP,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_user_credentials_user_id ON kite_user_credentials(user_id);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_user_credentials_is_active ON kite_user_credentials(is_active);`);
+      logger.info('✅ kite_user_credentials table ready');
+
+      // 2. Create kite_tokens table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS kite_tokens (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) NOT NULL,
+          access_token TEXT NOT NULL,
+          public_token TEXT,
+          login_time TIMESTAMP,
+          expires_at TIMESTAMP,
+          generation_method VARCHAR(50) DEFAULT 'manual',
+          is_valid BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_user_id ON kite_tokens(user_id);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_is_valid ON kite_tokens(is_valid);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_expires_at ON kite_tokens(expires_at);`);
+      logger.info('✅ kite_tokens table ready');
+
+      // 3. Create token_generation_logs table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS token_generation_logs (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          status VARCHAR(50) NOT NULL,
+          error_message TEXT,
+          execution_time_ms INTEGER,
+          created_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_generation_logs_user_id ON token_generation_logs(user_id);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_generation_logs_created_at ON token_generation_logs(created_at);`);
+      logger.info('✅ token_generation_logs table ready');
+
+      // 4. Create stored_tokens table
       await pool.query(`
         CREATE TABLE IF NOT EXISTS stored_tokens (
           id SERIAL PRIMARY KEY,
@@ -196,16 +253,21 @@ class MigrationRunner {
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_user_id ON stored_tokens(user_id);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_updated_at ON stored_tokens(updated_at);`);
       logger.info('✅ stored_tokens table ready');
 
-      // Create indexes
+      // 5. Create update trigger function
       await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_stored_tokens_user_id ON stored_tokens(user_id);
+        CREATE OR REPLACE FUNCTION update_updated_at_column()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+        END;
+        $$ language 'plpgsql';
       `);
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_stored_tokens_updated_at ON stored_tokens(updated_at);
-      `);
-      logger.info('✅ stored_tokens indexes ready');
+      logger.info('✅ Trigger function ready');
 
       return { success: true };
 
