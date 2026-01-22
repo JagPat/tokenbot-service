@@ -5,10 +5,10 @@ const cors = require('cors');
 const helmet = require('helmet');
 const logger = require('./utils/logger');
 const db = require('./config/database');
+const migrationRunner = require('./config/migrations');
 const encryptor = require('./services/encryptor');
 const scheduler = require('./services/scheduler');
 const browserPool = require('./services/browserPool');
-// const envCredentialSync = require('./services/envCredentialSync'); // REMOVED: Credentials come from database only (original design)
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 // Import routes
@@ -87,8 +87,48 @@ app.use(errorHandler);
 
 // Startup
 async function startServer() {
-  // Start server FIRST to ensure it's listening ASAP for healthchecks
-  // Then initialize other services in background
+  logger.info('🚀 Starting TokenBot Service...');
+
+  // Check required environment variables
+  const requiredEnvVars = ['DATABASE_URL', 'ENCRYPTION_KEY'];
+  const missingVars = requiredEnvVars.filter(v => !process.env[v]);
+
+  if (missingVars.length > 0) {
+    logger.warn(`⚠️ Missing environment variables: ${missingVars.join(', ')}`);
+    logger.warn('⚠️ Service will start in limited mode. Set these variables for full functionality.');
+  }
+
+  // RUN MIGRATIONS BEFORE ANYTHING ELSE
+  // This ensures database schema is ready before the server starts accepting requests
+  if (process.env.DATABASE_URL) {
+    try {
+      logger.info('🔄 Initializing database schema...');
+      
+      // First, try to run migrations from files
+      const migrationResult = await migrationRunner.runMigrations();
+      
+      if (!migrationResult.success && migrationResult.reason !== 'no_migrations_dir') {
+        // If file-based migrations fail, try essential inline migrations
+        logger.warn('⚠️ File-based migrations failed, trying inline migrations...');
+        const essentialResult = await migrationRunner.runEssentialMigrations();
+        if (!essentialResult.success) {
+          logger.error('❌ Essential migrations also failed:', essentialResult.error);
+        }
+      }
+      
+      logger.info('✅ Database schema initialized');
+    } catch (migrationError) {
+      logger.error('❌ Migration error:', migrationError.message);
+      // Try essential migrations as fallback
+      try {
+        await migrationRunner.runEssentialMigrations();
+      } catch (essentialError) {
+        logger.error('❌ Essential migrations also failed:', essentialError.message);
+      }
+    }
+  }
+
+  // Start server to respond to healthchecks
   const server = await new Promise((resolve, reject) => {
     const server = app.listen(PORT, '0.0.0.0', () => {
       logger.info(`✅ TokenBot Service running on port ${PORT}`);
@@ -102,21 +142,9 @@ async function startServer() {
     });
   });
 
-  // Initialize services in background (non-blocking)
-  // Don't await - let it run in background so server responds immediately
+  // Initialize remaining services in background (non-blocking)
   (async () => {
     try {
-      logger.info('🚀 Starting TokenBot Service...');
-
-      // Check required environment variables
-      const requiredEnvVars = ['DATABASE_URL', 'ENCRYPTION_KEY'];
-      const missingVars = requiredEnvVars.filter(v => !process.env[v]);
-
-      if (missingVars.length > 0) {
-        logger.warn(`⚠️ Missing environment variables: ${missingVars.join(', ')}`);
-        logger.warn('⚠️ Service will start in limited mode. Set these variables for full functionality.');
-      }
-
       // Test database connection (with fallback)
       if (process.env.DATABASE_URL) {
         try {
@@ -124,15 +152,11 @@ async function startServer() {
           logger.info('✅ Database connected');
         } catch (dbError) {
           logger.error('❌ Database connection failed:', dbError.message);
-          logger.warn('⚠️ Starting service without database (limited functionality)');
+          logger.warn('⚠️ Service running without database (limited functionality)');
         }
       } else {
         logger.warn('⚠️ DATABASE_URL not set, skipping database connection');
       }
-
-      // Credentials come from database only (original design)
-      // Database is the single source of truth. Credentials are stored via API endpoints.
-      // Environment variable sync was removed to prevent overwriting database credentials.
 
       // Test encryption (with fallback)
       if (process.env.ENCRYPTION_KEY) {
