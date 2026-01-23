@@ -213,7 +213,8 @@ router.get('/schema', async (req, res) => {
     requiredIndexes.forEach(req => {
       const hasIndex = indexes.some(i => 
         i.tablename === req.table && 
-        i.indexdef.toLowerCase().includes(req.column.toLowerCase())
+        (i.indexdef.toLowerCase().includes(req.column.toLowerCase()) ||
+         i.indexname.toLowerCase().includes(req.column.toLowerCase()))
       );
       if (!hasIndex) {
         recommendations.push(`Missing index on '${req.table}.${req.column}'`);
