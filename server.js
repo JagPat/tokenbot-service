@@ -1,4 +1,4 @@
-console.log("DEBUG: Server Process Started " + new Date().toISOString());
+console.log("DEBUG: Server Process Started " + new Date().toISOString() + " - Build v1.0.1");
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -103,9 +103,12 @@ async function startServer() {
   if (process.env.DATABASE_URL) {
     try {
       logger.info('🔄 Initializing database schema...');
+      logger.info(`📍 DATABASE_URL present: ${!!process.env.DATABASE_URL}`);
       
       // First, try to run migrations from files
+      logger.info('🔄 Step 1: Running file-based migrations...');
       const migrationResult = await migrationRunner.runMigrations();
+      logger.info(`📋 File migrations result: ${JSON.stringify(migrationResult)}`);
       
       // ALWAYS run essential migrations as a safety net
       // This ensures critical tables exist even if file migrations fail
@@ -116,10 +119,33 @@ async function startServer() {
       }
       
       // Always run essential migrations to ensure all tables exist
+      logger.info('🔄 Step 2: Running essential (inline) migrations...');
       const essentialResult = await migrationRunner.runEssentialMigrations();
+      logger.info(`📋 Essential migrations result: ${JSON.stringify(essentialResult)}`);
+      
       if (!essentialResult.success) {
         logger.error('❌ Essential migrations failed:', essentialResult.error);
         throw new Error(`Database migration failed: ${essentialResult.error}`);
+      }
+      
+      // Verify tables exist
+      logger.info('🔄 Step 3: Verifying tables exist...');
+      const { Pool } = require('pg');
+      const verifyPool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: process.env.DATABASE_URL.includes('sslmode=require') ? { rejectUnauthorized: false } : false,
+        max: 1
+      });
+      const tableCheck = await verifyPool.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+      `);
+      await verifyPool.end();
+      logger.info(`✅ Tables found: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
+      
+      if (tableCheck.rows.length < 3) {
+        logger.error('❌ CRITICAL: Not all required tables exist!');
+        throw new Error('Required database tables not created');
       }
       
       logger.info('✅ Database schema initialized and verified');
@@ -129,6 +155,8 @@ async function startServer() {
       // Don't continue if migrations fail - database is required
       throw new Error(`Failed to initialize database: ${migrationError.message}`);
     }
+  } else {
+    logger.error('❌ DATABASE_URL not set - cannot run migrations');
   }
 
   // Start server to respond to healthchecks
