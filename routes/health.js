@@ -115,5 +115,57 @@ router.get('/detailed', async (req, res) => {
   }
 });
 
+/**
+ * POST /health/migrate
+ * Force run database migrations (for debugging/recovery)
+ */
+router.post('/migrate', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  const expectedKey = process.env.JWT_SECRET || process.env.TOKENBOT_API_KEY;
+  
+  // Require API key for security
+  if (!apiKey || apiKey !== expectedKey) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized - API key required'
+    });
+  }
+
+  try {
+    logger.info('🔄 [HEALTH] Force migration requested...');
+    
+    const migrationRunner = require('../config/migrations');
+    
+    // Run essential migrations
+    logger.info('🔄 Running essential (inline) migrations...');
+    const result = await migrationRunner.runEssentialMigrations();
+    
+    if (result.success) {
+      // Verify tables
+      const tableCheck = await db.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs')
+      `);
+      
+      logger.info(`✅ [HEALTH] Migration complete. Tables: ${tableCheck.rows.map(r => r.table_name).join(', ')}`);
+      
+      res.json({
+        success: true,
+        message: 'Migrations completed successfully',
+        tables: tableCheck.rows.map(r => r.table_name)
+      });
+    } else {
+      throw new Error(result.error || 'Migration failed');
+    }
+  } catch (error) {
+    logger.error('❌ [HEALTH] Migration failed:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
 
