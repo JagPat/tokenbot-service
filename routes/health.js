@@ -116,6 +116,144 @@ router.get('/detailed', async (req, res) => {
 });
 
 /**
+ * GET /health/schema
+ * Get database schema details including tables, indexes, and constraints
+ */
+router.get('/schema', async (req, res) => {
+  try {
+    // Get all tables
+    const tablesResult = await db.query(`
+      SELECT table_name, 
+             (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = t.table_name) as column_count
+      FROM information_schema.tables t
+      WHERE table_schema = 'public' 
+      AND table_type = 'BASE TABLE'
+      ORDER BY table_name
+    `);
+
+    // Get all indexes
+    const indexesResult = await db.query(`
+      SELECT 
+        schemaname,
+        tablename,
+        indexname,
+        indexdef
+      FROM pg_indexes 
+      WHERE schemaname = 'public'
+      ORDER BY tablename, indexname
+    `);
+
+    // Get table sizes
+    const sizesResult = await db.query(`
+      SELECT 
+        relname as table_name,
+        pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+        pg_size_pretty(pg_relation_size(relid)) as data_size,
+        pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as index_size,
+        n_live_tup as row_count
+      FROM pg_stat_user_tables
+      ORDER BY pg_total_relation_size(relid) DESC
+    `);
+
+    // Get triggers
+    const triggersResult = await db.query(`
+      SELECT 
+        trigger_name,
+        event_manipulation,
+        event_object_table,
+        action_timing
+      FROM information_schema.triggers
+      WHERE trigger_schema = 'public'
+    `);
+
+    // Get constraints
+    const constraintsResult = await db.query(`
+      SELECT 
+        tc.table_name,
+        tc.constraint_name,
+        tc.constraint_type,
+        kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu 
+        ON tc.constraint_name = kcu.constraint_name
+      WHERE tc.table_schema = 'public'
+      ORDER BY tc.table_name, tc.constraint_type
+    `);
+
+    // Build optimization report
+    const tables = tablesResult.rows;
+    const indexes = indexesResult.rows;
+    const sizes = sizesResult.rows;
+    const triggers = triggersResult.rows;
+    const constraints = constraintsResult.rows;
+
+    // Check for missing optimizations
+    const recommendations = [];
+    
+    // Check if each table has a primary key
+    const tablesWithPK = new Set(constraints.filter(c => c.constraint_type === 'PRIMARY KEY').map(c => c.table_name));
+    tables.forEach(t => {
+      if (!tablesWithPK.has(t.table_name) && !t.table_name.startsWith('_')) {
+        recommendations.push(`Table '${t.table_name}' is missing a PRIMARY KEY`);
+      }
+    });
+
+    // Check for user_id indexes on key tables
+    const requiredIndexes = [
+      { table: 'kite_tokens', column: 'user_id' },
+      { table: 'kite_tokens', column: 'is_valid' },
+      { table: 'kite_tokens', column: 'expires_at' },
+      { table: 'kite_user_credentials', column: 'user_id' },
+      { table: 'kite_user_credentials', column: 'is_active' },
+      { table: 'stored_tokens', column: 'user_id' },
+      { table: 'token_generation_logs', column: 'user_id' },
+      { table: 'token_generation_logs', column: 'created_at' }
+    ];
+
+    requiredIndexes.forEach(req => {
+      const hasIndex = indexes.some(i => 
+        i.tablename === req.table && 
+        i.indexdef.toLowerCase().includes(req.column.toLowerCase())
+      );
+      if (!hasIndex) {
+        recommendations.push(`Missing index on '${req.table}.${req.column}'`);
+      }
+    });
+
+    res.json({
+      success: true,
+      schema: {
+        tables: tables.map(t => ({
+          name: t.table_name,
+          columns: parseInt(t.column_count),
+          size: sizes.find(s => s.table_name === t.table_name) || null
+        })),
+        indexes: indexes.map(i => ({
+          table: i.tablename,
+          name: i.indexname,
+          definition: i.indexdef
+        })),
+        triggers: triggers,
+        constraints: constraints
+      },
+      optimization: {
+        total_tables: tables.length,
+        total_indexes: indexes.length,
+        total_triggers: triggers.length,
+        recommendations: recommendations,
+        status: recommendations.length === 0 ? 'OPTIMIZED' : 'NEEDS_ATTENTION'
+      }
+    });
+  } catch (error) {
+    logger.error('Schema check failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * POST /health/migrate
  * Force run database migrations (for debugging/recovery)
  */
