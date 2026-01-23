@@ -107,24 +107,27 @@ async function startServer() {
       // First, try to run migrations from files
       const migrationResult = await migrationRunner.runMigrations();
       
-      if (!migrationResult.success && migrationResult.reason !== 'no_migrations_dir') {
-        // If file-based migrations fail, try essential inline migrations
-        logger.warn('⚠️ File-based migrations failed, trying inline migrations...');
-        const essentialResult = await migrationRunner.runEssentialMigrations();
-        if (!essentialResult.success) {
-          logger.error('❌ Essential migrations also failed:', essentialResult.error);
-        }
+      // ALWAYS run essential migrations as a safety net
+      // This ensures critical tables exist even if file migrations fail
+      if (!migrationResult.success || migrationResult.reason === 'no_migrations_dir') {
+        logger.warn('⚠️ File-based migrations unavailable, running essential migrations...');
+      } else {
+        logger.info('✅ File-based migrations completed, verifying with essential migrations...');
       }
       
-      logger.info('✅ Database schema initialized');
+      // Always run essential migrations to ensure all tables exist
+      const essentialResult = await migrationRunner.runEssentialMigrations();
+      if (!essentialResult.success) {
+        logger.error('❌ Essential migrations failed:', essentialResult.error);
+        throw new Error(`Database migration failed: ${essentialResult.error}`);
+      }
+      
+      logger.info('✅ Database schema initialized and verified');
     } catch (migrationError) {
       logger.error('❌ Migration error:', migrationError.message);
-      // Try essential migrations as fallback
-      try {
-        await migrationRunner.runEssentialMigrations();
-      } catch (essentialError) {
-        logger.error('❌ Essential migrations also failed:', essentialError.message);
-      }
+      logger.error('Stack:', migrationError.stack);
+      // Don't continue if migrations fail - database is required
+      throw new Error(`Failed to initialize database: ${migrationError.message}`);
     }
   }
 
