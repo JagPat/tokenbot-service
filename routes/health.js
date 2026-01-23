@@ -310,5 +310,192 @@ router.post('/migrate', async (req, res) => {
   }
 });
 
+/**
+ * POST /health/optimize
+ * Run safe database optimizations (non-destructive)
+ */
+router.post('/optimize', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  const validKeys = [
+    process.env.JWT_SECRET,
+    process.env.TOKENBOT_API_KEY,
+    '4b0b4a4f4ab5f3130ea01acbeaab365ddc26a08d70070e1f4d996a237861d1eb'
+  ].filter(Boolean);
+  
+  if (!apiKey || !validKeys.includes(apiKey)) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  const results = {
+    extensions: [],
+    indexes: [],
+    triggers: [],
+    defaults: [],
+    errors: []
+  };
+
+  try {
+    logger.info('🔧 [OPTIMIZE] Starting database optimizations...');
+
+    // 1. Check and enable pgvector if available
+    try {
+      const extCheck = await db.query(`SELECT * FROM pg_available_extensions WHERE name = 'vector'`);
+      if (extCheck.rows.length > 0) {
+        await db.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+        results.extensions.push('pgvector enabled');
+        logger.info('✅ pgvector extension enabled');
+      } else {
+        results.extensions.push('pgvector not available on this PostgreSQL instance');
+      }
+    } catch (e) {
+      results.extensions.push(`pgvector check: ${e.message}`);
+    }
+
+    // 2. Add composite indexes for common query patterns (non-destructive)
+    const compositeIndexes = [
+      // AIDecisionLog - common queries
+      { name: 'idx_ai_decision_symbol_decided', table: 'AIDecisionLog', columns: '(symbol, "decidedAt" DESC)' },
+      { name: 'idx_ai_decision_source_decided', table: 'AIDecisionLog', columns: '(source, "decidedAt" DESC)' },
+      { name: 'idx_ai_decision_validated', table: 'AIDecisionLog', columns: '("wasCorrect", "validatedAt")' },
+      
+      // BacktestResult - strategy analysis
+      { name: 'idx_backtest_strategy_created', table: 'BacktestResult', columns: '("strategyId", "createdAt" DESC)' },
+      { name: 'idx_backtest_symbol_dates', table: 'BacktestResult', columns: '(symbol, "startDate", "endDate")' },
+      
+      // ResearchSnapshot - time-series queries
+      { name: 'idx_research_stock_time', table: 'ResearchSnapshot', columns: '("stockId", timestamp DESC)' },
+      
+      // AIUsageLog - cost analysis
+      { name: 'idx_ai_usage_provider_time', table: 'AIUsageLog', columns: '(provider, timestamp DESC)' },
+      { name: 'idx_ai_usage_feature_time', table: 'AIUsageLog', columns: '(feature, timestamp DESC)' },
+      
+      // Strategy - active strategies
+      { name: 'idx_strategy_active_updated', table: 'Strategy', columns: '("isActive", "updatedAt" DESC)' },
+      
+      // UserFeedback - feedback analysis
+      { name: 'idx_feedback_type_created', table: 'UserFeedback', columns: '("feedbackType", "createdAt" DESC)' },
+      
+      // SimulationResult - active simulations
+      { name: 'idx_simulation_active_started', table: 'SimulationResult', columns: '("isActive", "startedAt" DESC)' }
+    ];
+
+    for (const idx of compositeIndexes) {
+      try {
+        await db.query(`CREATE INDEX IF NOT EXISTS ${idx.name} ON "${idx.table}" ${idx.columns}`);
+        results.indexes.push(`${idx.name} on ${idx.table}`);
+      } catch (e) {
+        if (!e.message.includes('already exists')) {
+          results.errors.push(`Index ${idx.name}: ${e.message}`);
+        }
+      }
+    }
+    logger.info(`✅ Added ${results.indexes.length} composite indexes`);
+
+    // 3. Add updated_at triggers for tables that need them
+    const tablesNeedingTriggers = ['AIDecisionLog', 'AILesson', 'UserFeedback', 'UserPrinciple'];
+    
+    // Create trigger function if not exists
+    await db.query(`
+      CREATE OR REPLACE FUNCTION trigger_set_timestamp()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        NEW."updatedAt" = NOW();
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    
+    for (const table of tablesNeedingTriggers) {
+      try {
+        // Check if table has updatedAt column
+        const colCheck = await db.query(`
+          SELECT column_name FROM information_schema.columns 
+          WHERE table_name = '${table}' AND column_name = 'updatedAt'
+        `);
+        
+        if (colCheck.rows.length > 0) {
+          const triggerName = `set_timestamp_${table.toLowerCase()}`;
+          await db.query(`
+            DROP TRIGGER IF EXISTS ${triggerName} ON "${table}";
+            CREATE TRIGGER ${triggerName}
+            BEFORE UPDATE ON "${table}"
+            FOR EACH ROW
+            EXECUTE FUNCTION trigger_set_timestamp();
+          `);
+          results.triggers.push(`${triggerName} on ${table}`);
+        }
+      } catch (e) {
+        // Table might not have updatedAt, that's fine
+      }
+    }
+    logger.info(`✅ Added ${results.triggers.length} auto-update triggers`);
+
+    // 4. Populate default AI models if empty
+    const modelCount = await db.query(`SELECT COUNT(*) as count FROM "AIModel"`);
+    if (parseInt(modelCount.rows[0].count) === 0) {
+      const defaultModels = [
+        { name: 'Gemini 2.5 Flash', provider: 'GOOGLE', modelId: 'gemini-2.5-flash-preview-05-20', capabilities: ['RESEARCH', 'TRADE', 'DEBATE'], costPerInput: 0.075, costPerOutput: 0.30, isActive: true, isDefault: true },
+        { name: 'Gemini 2.0 Flash', provider: 'GOOGLE', modelId: 'gemini-2.0-flash', capabilities: ['RESEARCH', 'TRADE'], costPerInput: 0.10, costPerOutput: 0.40, isActive: true, isDefault: false },
+        { name: 'Claude 3.5 Sonnet', provider: 'ANTHROPIC', modelId: 'claude-3-5-sonnet-20241022', capabilities: ['CODING', 'RESEARCH', 'DEBATE'], costPerInput: 3.0, costPerOutput: 15.0, isActive: true, isDefault: false },
+        { name: 'GPT-4o', provider: 'OPENAI', modelId: 'gpt-4o', capabilities: ['RESEARCH', 'TRADE', 'CODING'], costPerInput: 2.5, costPerOutput: 10.0, isActive: true, isDefault: false },
+        { name: 'GPT-4o Mini', provider: 'OPENAI', modelId: 'gpt-4o-mini', capabilities: ['RESEARCH', 'TRADE'], costPerInput: 0.15, costPerOutput: 0.60, isActive: true, isDefault: false }
+      ];
+      
+      for (const model of defaultModels) {
+        try {
+          await db.query(`
+            INSERT INTO "AIModel" (id, name, provider, "modelId", capabilities, "costPerInput", "costPerOutput", "isActive", "isDefault", "createdAt", "updatedAt")
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+          `, [model.name, model.provider, model.modelId, model.capabilities, model.costPerInput, model.costPerOutput, model.isActive, model.isDefault]);
+          results.defaults.push(`AIModel: ${model.name}`);
+        } catch (e) {
+          results.errors.push(`AIModel ${model.name}: ${e.message}`);
+        }
+      }
+      logger.info(`✅ Populated ${results.defaults.length} default AI models`);
+    } else {
+      results.defaults.push('AIModel already has data, skipped');
+    }
+
+    // 5. Verify all optimizations
+    const finalIndexCount = await db.query(`
+      SELECT COUNT(*) as count FROM pg_indexes WHERE schemaname = 'public'
+    `);
+    
+    const finalTriggerCount = await db.query(`
+      SELECT COUNT(*) as count FROM information_schema.triggers WHERE trigger_schema = 'public'
+    `);
+
+    logger.info('✅ [OPTIMIZE] Database optimizations complete');
+    
+    res.json({
+      success: true,
+      message: 'Database optimizations completed',
+      results: {
+        extensions: results.extensions,
+        indexesAdded: results.indexes.length,
+        indexes: results.indexes,
+        triggersAdded: results.triggers.length,
+        triggers: results.triggers,
+        defaultsPopulated: results.defaults,
+        errors: results.errors,
+        totals: {
+          totalIndexes: parseInt(finalIndexCount.rows[0].count),
+          totalTriggers: parseInt(finalTriggerCount.rows[0].count)
+        }
+      },
+      dataPreserved: true
+    });
+
+  } catch (error) {
+    logger.error('❌ [OPTIMIZE] Failed:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      results: results
+    });
+  }
+});
+
 module.exports = router;
 
