@@ -235,6 +235,31 @@ router.patch('/toggle', authenticateUser, async (req, res, next) => {
  * Service-to-service authentication only
  */
 router.patch('/api-key', async (req, res, next) => {
+  // Verify table exists before attempting query
+  try {
+    const tableCheck = await db.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'kite_user_credentials'
+      )
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      logger.error('❌ CRITICAL: kite_user_credentials table does not exist!');
+      logger.error('   This indicates migrations did not run or database connection issue');
+      return res.status(500).json({
+        success: false,
+        error: 'Database schema incomplete: kite_user_credentials table missing. Please check TokenBot logs for migration errors.'
+      });
+    }
+  } catch (checkError) {
+    logger.error('❌ Error checking table existence:', checkError.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Database connection error. Please check TokenBot configuration.'
+    });
+  }
   try {
     // Service-to-service authentication (no user auth required)
     const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
