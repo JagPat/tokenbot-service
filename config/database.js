@@ -15,7 +15,7 @@ class Database {
       const connectionString = process.env.DATABASE_URL || '';
       const isRailwayInternal = connectionString.includes('railway.internal');
       const hasSSLMode = connectionString.includes('sslmode=');
-      
+
       // Extract sslmode from connection string if present
       let sslConfig = false;
       if (hasSSLMode) {
@@ -45,17 +45,17 @@ class Database {
       } catch (e) {
         // Ignore parsing errors
       }
-      
+
       console.log(`📍 [Database] Connecting to: ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}`);
-      
+
       this.pool = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: sslConfig,
         max: 20,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 2000,
+        connectionTimeoutMillis: 10000,
       });
-      
+
       // Verify connection and log database name
       this.pool.on('connect', async (client) => {
         try {
@@ -83,7 +83,7 @@ class Database {
     if (!this.pool) {
       throw new Error('Database pool not initialized - check DATABASE_URL');
     }
-    
+
     const start = Date.now();
     try {
       const res = await this.pool.query(text, params);

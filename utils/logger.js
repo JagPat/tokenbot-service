@@ -18,14 +18,13 @@ const logger = winston.createLogger({
         winston.format.colorize(),
         winston.format.printf(
           ({ level, message, timestamp, ...meta }) => {
-            return `${timestamp} [${level}]: ${message} ${
-              Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''
-            }`;
+            return `${timestamp} [${level}]: ${message} ${Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''
+              }`;
           }
         )
       )
     }),
-    
+
     // File transport for errors
     new winston.transports.File({
       filename: 'logs/error.log',
@@ -33,7 +32,7 @@ const logger = winston.createLogger({
       maxsize: 5242880, // 5MB
       maxFiles: 5
     }),
-    
+
     // File transport for all logs
     new winston.transports.File({
       filename: 'logs/combined.log',
@@ -49,8 +48,14 @@ const logger = winston.createLogger({
 const fs = require('fs');
 const path = require('path');
 const logsDir = path.join(__dirname, '..', 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
+try {
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+} catch (err) {
+  // If we can't create logs dir (e.g. read-only fs), just ignore. 
+  // Winston console transport will still work.
+  console.error('⚠️ Could not create logs directory:', err.message);
 }
 
 module.exports = logger;
