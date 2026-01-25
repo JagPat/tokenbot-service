@@ -33,12 +33,37 @@ class Database {
         sslConfig = false; // Disable SSL for now since new DB doesn't support it
       }
 
+      // Extract database info for logging
+      let dbInfo = { host: 'unknown', port: 'unknown', database: 'unknown' };
+      try {
+        const url = new URL(process.env.DATABASE_URL.replace(/^postgresql:\/\//, 'http://'));
+        dbInfo = {
+          host: url.hostname || 'unknown',
+          port: url.port || '5432',
+          database: url.pathname?.replace('/', '') || 'unknown'
+        };
+      } catch (e) {
+        // Ignore parsing errors
+      }
+      
+      console.log(`📍 [Database] Connecting to: ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}`);
+      
       this.pool = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: sslConfig,
         max: 20,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 2000,
+      });
+      
+      // Verify connection and log database name
+      this.pool.on('connect', async (client) => {
+        try {
+          const result = await client.query('SELECT current_database(), current_user');
+          console.log(`✅ [Database] Connected to: ${result.rows[0].current_database} as ${result.rows[0].current_user}`);
+        } catch (e) {
+          // Ignore errors during connection logging
+        }
       });
 
       this.pool.on('error', (err) => {

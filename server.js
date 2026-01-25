@@ -130,11 +130,24 @@ async function startServer() {
       
       // Verify tables exist and check columns (using main db pool)
       logger.info('🔄 Step 3: Verifying tables exist...');
+      
+      // First, verify which database we're connected to
+      const dbInfo = await db.query('SELECT current_database(), current_user');
+      logger.info(`📍 Connected to database: ${dbInfo.rows[0].current_database} as ${dbInfo.rows[0].current_user}`);
+      
       const tableCheck = await db.query(`
         SELECT table_name FROM information_schema.tables 
         WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
       `);
       logger.info(`✅ Tables found: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
+      
+      // Also list all tables for debugging
+      const allTables = await db.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        ORDER BY table_name
+      `);
+      logger.info(`📋 All tables in database: ${allTables.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
       
       if (tableCheck.rows.length < 3) {
         logger.error('❌ CRITICAL: Not all required tables exist!');

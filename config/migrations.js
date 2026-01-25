@@ -13,6 +13,23 @@ class MigrationRunner {
   }
 
   /**
+   * Extract database connection info for logging (without credentials)
+   */
+  extractDbInfo(connectionString) {
+    try {
+      // Parse connection string to extract host, port, database
+      const url = new URL(connectionString.replace(/^postgresql:\/\//, 'http://'));
+      return {
+        host: url.hostname || 'unknown',
+        port: url.port || '5432',
+        database: url.pathname?.replace('/', '') || 'unknown'
+      };
+    } catch (e) {
+      return { host: 'unknown', port: 'unknown', database: 'unknown' };
+    }
+  }
+
+  /**
    * Get SSL configuration based on connection string
    */
   getSSLConfig(connectionString) {
@@ -172,6 +189,10 @@ class MigrationRunner {
     const connectionString = process.env.DATABASE_URL;
     const sslConfig = this.getSSLConfig(connectionString);
 
+    // Extract database info for logging (without exposing credentials)
+    const dbInfo = this.extractDbInfo(connectionString);
+    logger.info(`📍 Database connection info: ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}`);
+
     const pool = new Pool({
       connectionString,
       ssl: sslConfig,
@@ -181,6 +202,11 @@ class MigrationRunner {
     });
 
     try {
+      // Verify we're connected to the right database
+      const dbCheck = await pool.query('SELECT current_database(), current_user, version()');
+      logger.info(`✅ Connected to database: ${dbCheck.rows[0].current_database}`);
+      logger.info(`✅ Connected as user: ${dbCheck.rows[0].current_user}`);
+      
       logger.info('🔄 Running essential database migrations (inline)...');
 
       // 1. Create kite_user_credentials table
