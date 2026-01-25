@@ -133,8 +133,12 @@ async function initializeServices() {
 
       if (tableCheck.rows.length < 4) {
         logger.error(`❌ Missing tables. Found: ${tableCheck.rows.map(r => r.table_name).join(', ')}`);
+        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
         // Try retry once
-        await migrationRunner.runEssentialMigrations(true, db.pool);
+        const retryResult = await migrationRunner.runEssentialMigrations(true, db.pool);
+        if (!retryResult.success) {
+          logger.error('❌ Migration retry failed - service may not function correctly');
+        }
       } else {
         logger.info('✅ All required tables verified');
       }
