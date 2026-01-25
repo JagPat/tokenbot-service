@@ -58,18 +58,24 @@ router.post('/refresh', async (req, res, next) => {
     
     // Provide user-friendly error messages
     let errorMessage = error.message;
+    let statusCode = 500;
     
     if (error.message.includes('No active credentials')) {
       errorMessage = 'Please configure your broker credentials first';
+      statusCode = 404;
+    } else if (error.message.includes('incomplete') || error.message.includes('incomplete')) {
+      errorMessage = 'Credentials incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please use POST /api/credentials to set them up.';
+      statusCode = 400;
     } else if (error.message.includes('Request token not found')) {
       errorMessage = 'Authentication failed. Please check your credentials';
     } else if (error.message.includes('TOTP')) {
       errorMessage = 'TOTP verification failed. Please check your TOTP secret';
     }
     
-    res.status(500).json({ 
+    res.status(statusCode).json({ 
       success: false, 
-      error: errorMessage 
+      error: errorMessage,
+      hint: error.message.includes('incomplete') ? 'Use POST /api/credentials with all required fields (kite_user_id, password, totp_secret, api_key, api_secret) to complete credential setup.' : undefined
     });
   }
 });
