@@ -180,26 +180,33 @@ class MigrationRunner {
    * Run essential migrations inline (without reading from files)
    * This is a fallback in case the migrations directory is not available
    */
-  async runEssentialMigrations() {
+  async runEssentialMigrations(useSharedPool = false, sharedPool = null) {
     if (!process.env.DATABASE_URL) {
       logger.warn('⚠️ DATABASE_URL not set, skipping essential migrations');
       return { success: false, reason: 'no_database_url' };
     }
 
-    const connectionString = process.env.DATABASE_URL;
-    const sslConfig = this.getSSLConfig(connectionString);
+    // Use shared pool if provided, otherwise create new one
+    let pool = sharedPool;
+    let shouldClosePool = false;
+    
+    if (!useSharedPool || !sharedPool) {
+      const connectionString = process.env.DATABASE_URL;
+      const sslConfig = this.getSSLConfig(connectionString);
 
-    // Extract database info for logging (without exposing credentials)
-    const dbInfo = this.extractDbInfo(connectionString);
-    logger.info(`📍 Database connection info: ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}`);
+      // Extract database info for logging (without exposing credentials)
+      const dbInfo = this.extractDbInfo(connectionString);
+      logger.info(`📍 Database connection info: ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}`);
 
-    const pool = new Pool({
-      connectionString,
-      ssl: sslConfig,
-      max: 3,
-      idleTimeoutMillis: 10000,
-      connectionTimeoutMillis: 5000,
-    });
+      pool = new Pool({
+        connectionString,
+        ssl: sslConfig,
+        max: 3,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 10000, // Increased timeout
+      });
+      shouldClosePool = true;
+    }
 
     try {
       // Verify we're connected to the right database
@@ -380,9 +387,18 @@ class MigrationRunner {
 
     } catch (error) {
       logger.error('❌ Essential migrations failed:', error.message);
+      logger.error('❌ Migration error stack:', error.stack);
       return { success: false, error: error.message };
     } finally {
-      await pool.end();
+      // Only close pool if we created it (not if it's shared)
+      if (shouldClosePool && pool) {
+        try {
+          await pool.end();
+          logger.info('✅ Migration pool closed');
+        } catch (closeError) {
+          logger.warn(`⚠️ Error closing migration pool: ${closeError.message}`);
+        }
+      }
     }
   }
 }

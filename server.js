@@ -119,8 +119,10 @@ async function startServer() {
       }
       
       // Always run essential migrations to ensure all tables exist
+      // Use the shared database pool to ensure we're using the same connection
       logger.info('🔄 Step 2: Running essential (inline) migrations...');
-      const essentialResult = await migrationRunner.runEssentialMigrations();
+      logger.info('📍 Using shared database pool for migrations...');
+      const essentialResult = await migrationRunner.runEssentialMigrations(true, db.pool);
       logger.info(`📋 Essential migrations result: ${JSON.stringify(essentialResult)}`);
       
       if (!essentialResult.success) {
@@ -131,14 +133,31 @@ async function startServer() {
       // Verify tables exist and check columns (using main db pool)
       logger.info('🔄 Step 3: Verifying tables exist...');
       
+      // Wait a moment for any async operations to complete
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
       // First, verify which database we're connected to
       const dbInfo = await db.query('SELECT current_database(), current_user');
       logger.info(`📍 Connected to database: ${dbInfo.rows[0].current_database} as ${dbInfo.rows[0].current_user}`);
       
-      const tableCheck = await db.query(`
-        SELECT table_name FROM information_schema.tables 
-        WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
-      `);
+      // Retry table check up to 3 times (in case of timing issues)
+      let tableCheck;
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          tableCheck = await db.query(`
+            SELECT table_name FROM information_schema.tables 
+            WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+          `);
+          break;
+        } catch (checkError) {
+          retries--;
+          if (retries === 0) throw checkError;
+          logger.warn(`⚠️ Table check failed, retrying... (${retries} attempts left)`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
       logger.info(`✅ Tables found: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
       
       // Also list all tables for debugging
@@ -153,7 +172,26 @@ async function startServer() {
         logger.error('❌ CRITICAL: Not all required tables exist!');
         logger.error(`   Found tables: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
         logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
-        throw new Error('Required database tables not created - migrations failed');
+        logger.error('❌ Attempting to re-run essential migrations...');
+        
+        // Try one more time with the shared pool
+        const retryResult = await migrationRunner.runEssentialMigrations(true, db.pool);
+        if (!retryResult.success) {
+          throw new Error(`Required database tables not created - migrations failed: ${retryResult.error}`);
+        }
+        
+        // Re-check tables after retry
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const retryCheck = await db.query(`
+          SELECT table_name FROM information_schema.tables 
+          WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+        `);
+        
+        if (retryCheck.rows.length < 3) {
+          throw new Error(`Required database tables still not created after retry. Found: ${retryCheck.rows.map(r => r.table_name).join(', ')}`);
+        }
+        
+        logger.info('✅ Tables created successfully after retry');
       }
       
       // Verify stored_tokens has refresh tracking columns (non-blocking)
