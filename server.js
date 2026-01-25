@@ -128,19 +128,12 @@ async function startServer() {
         throw new Error(`Database migration failed: ${essentialResult.error}`);
       }
       
-      // Verify tables exist
+      // Verify tables exist and check columns (using main db pool)
       logger.info('🔄 Step 3: Verifying tables exist...');
-      const { Pool } = require('pg');
-      const verifyPool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: process.env.DATABASE_URL.includes('sslmode=require') ? { rejectUnauthorized: false } : false,
-        max: 1
-      });
-      const tableCheck = await verifyPool.query(`
+      const tableCheck = await db.query(`
         SELECT table_name FROM information_schema.tables 
         WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
       `);
-      await verifyPool.end();
       logger.info(`✅ Tables found: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
       
       if (tableCheck.rows.length < 3) {
@@ -152,7 +145,7 @@ async function startServer() {
       
       // Verify stored_tokens has refresh tracking columns (non-blocking)
       try {
-        const columnCheck = await verifyPool.query(`
+        const columnCheck = await db.query(`
           SELECT column_name 
           FROM information_schema.columns 
           WHERE table_name = 'stored_tokens' 
