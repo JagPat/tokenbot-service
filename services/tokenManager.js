@@ -19,15 +19,25 @@ class TokenManager {
       );
 
       if (credsResult.rows.length === 0) {
-        throw new Error(`No active credentials found for user ${userId}`);
+        throw new Error(`No active credentials found for user ${userId}. Please configure full credentials via POST /api/credentials`);
       }
 
       const creds = credsResult.rows[0];
       
       // Check if credentials are just placeholders (not fully set up)
-      const decryptedKiteUserId = encryptor.decrypt(creds.encrypted_password);
-      if (decryptedKiteUserId === 'pending_setup' || creds.kite_user_id === 'pending_setup') {
-        throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please create full credentials via POST /api/credentials`);
+      if (creds.kite_user_id === 'pending' || creds.kite_user_id === 'pending_setup') {
+        throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please create full credentials via POST /api/credentials with all required fields.`);
+      }
+      
+      // Also check if password/totp are placeholders
+      try {
+        const decryptedPassword = encryptor.decrypt(creds.encrypted_password);
+        if (decryptedPassword === 'pending' || decryptedPassword === 'pending_setup') {
+          throw new Error(`Credentials for user ${userId} are incomplete. Full credentials (kite_user_id, password, totp_secret) are required. Please use POST /api/credentials to set them up.`);
+        }
+      } catch (decryptError) {
+        // If decryption fails, credentials might be corrupted - treat as incomplete
+        throw new Error(`Credentials for user ${userId} appear to be incomplete or corrupted. Please recreate full credentials via POST /api/credentials`);
       }
       
       logger.info(`✅ Credentials found for user: ${userId}`);
