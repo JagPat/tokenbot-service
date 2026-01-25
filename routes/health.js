@@ -35,11 +35,29 @@ router.get('/', async (req, res) => {
     logger.error('Health check - database error:', error.message);
   }
 
-  // Verify critical tables exist
+  // Verify critical tables exist and get database info
   let tablesExist = false;
   let missingTables = [];
+  let dbInfo = null;
   if (dbConnected) {
     try {
+      // Get database connection info
+      const dbInfoResult = await db.query('SELECT current_database(), current_user, version()');
+      dbInfo = {
+        database: dbInfoResult.rows[0].current_database,
+        user: dbInfoResult.rows[0].current_user,
+        version: dbInfoResult.rows[0].version.split(' ')[0] + ' ' + dbInfoResult.rows[0].version.split(' ')[1] // PostgreSQL version
+      };
+      
+      // Extract connection info from DATABASE_URL (without credentials)
+      try {
+        const url = new URL(process.env.DATABASE_URL.replace(/^postgresql:\/\//, 'http://'));
+        dbInfo.host = url.hostname;
+        dbInfo.port = url.port || '5432';
+      } catch (e) {
+        // Ignore parsing errors
+      }
+      
       const tableCheck = await db.query(`
         SELECT table_name FROM information_schema.tables 
         WHERE table_schema = 'public' 
@@ -52,6 +70,7 @@ router.get('/', async (req, res) => {
       
       if (!tablesExist) {
         logger.error(`❌ CRITICAL: Missing required tables: ${missingTables.join(', ')}`);
+        logger.error(`   Database: ${dbInfo.database} on ${dbInfo.host || 'unknown'}:${dbInfo.port || 'unknown'}`);
       }
     } catch (tableError) {
       logger.error(`❌ Error checking tables: ${tableError.message}`);
@@ -71,7 +90,14 @@ router.get('/', async (req, res) => {
       latency_ms: dbLatency,
       error: dbError,
       tables_exist: tablesExist,
-      missing_tables: missingTables
+      missing_tables: missingTables,
+      info: dbInfo ? {
+        database: dbInfo.database,
+        host: dbInfo.host,
+        port: dbInfo.port,
+        user: dbInfo.user,
+        version: dbInfo.version
+      } : null
     },
     environment: {
       has_database_url: !!process.env.DATABASE_URL,
