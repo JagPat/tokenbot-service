@@ -105,6 +105,21 @@ async function startServer() {
       logger.info('🔄 Initializing database schema...');
       logger.info(`📍 DATABASE_URL present: ${!!process.env.DATABASE_URL}`);
       
+      // Ensure database pool is initialized
+      if (!db.pool) {
+        logger.error('❌ Database pool not initialized! Cannot run migrations.');
+        throw new Error('Database pool not initialized - check DATABASE_URL and database connection');
+      }
+      
+      // Test database connection before running migrations
+      try {
+        await db.query('SELECT 1');
+        logger.info('✅ Database connection verified');
+      } catch (connError) {
+        logger.error('❌ Database connection test failed:', connError.message);
+        throw new Error(`Database connection failed: ${connError.message}`);
+      }
+      
       // First, try to run migrations from files
       logger.info('🔄 Step 1: Running file-based migrations...');
       const migrationResult = await migrationRunner.runMigrations();
