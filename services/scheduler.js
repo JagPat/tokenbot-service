@@ -9,7 +9,7 @@ class Scheduler {
   }
 
   start() {
-    // Run daily at 8:30 AM IST
+    // Run daily at 8:30 AM IST (primary refresh)
     // Cron format: minute hour day month dayOfWeek
     const cronExpression = '30 8 * * *';
 
@@ -20,7 +20,19 @@ class Scheduler {
       timezone: 'Asia/Kolkata'
     });
 
+    // PROACTIVE REFRESH: Check every 2 hours for tokens expiring soon
+    // This ensures tokens are refreshed before expiry, not after
+    const proactiveCronExpression = '0 */2 * * *'; // Every 2 hours
+
+    cron.schedule(proactiveCronExpression, async () => {
+      logger.info('⏰ [Scheduler] Proactive refresh check (every 2 hours)');
+      await this.refreshExpiringTokens();
+    }, {
+      timezone: 'Asia/Kolkata'
+    });
+
     logger.info('✅ [Scheduler] Daily token refresh scheduled for 8:30 AM IST');
+    logger.info('✅ [Scheduler] Proactive refresh check scheduled every 2 hours');
     logger.info(`📅 [Scheduler] Next run: ${this.getNextRunTime()}`);
 
     // Startup Check: If it's between 8:30 AM and 3:30 PM, and we don't have a valid token
@@ -30,46 +42,129 @@ class Scheduler {
 
   async _runStartupCheck() {
     try {
-      // Get current time in IST
-      const now = new Date();
-      const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const hours = istTime.getHours();
-      const minutes = istTime.getMinutes();
+      logger.info('🔍 [Scheduler] Running startup token check...');
 
-      // Market hours check (approx 8:30 AM to 3:30 PM)
-      const isMarketHours = (hours > 8 || (hours === 8 && minutes >= 30)) && hours < 16;
+      // Get all active users
+      const usersResult = await db.query(`
+        SELECT user_id, kite_user_id 
+        FROM kite_user_credentials 
+        WHERE is_active = true AND auto_refresh_enabled = true
+      `);
 
-      if (isMarketHours) {
-        logger.info('🔍 [Scheduler] Service started during market hours. Checking for valid token...');
+      if (usersResult.rows.length === 0) {
+        logger.info('ℹ️ [Scheduler] No active users found for startup check');
+        return;
+      }
 
-        // Check for default user
-        const needsRefresh = await this._checkIfTokenNeeded('default');
+      logger.info(`🔍 [Scheduler] Checking tokens for ${usersResult.rows.length} active users...`);
 
+      let needsRefreshCount = 0;
+      for (const user of usersResult.rows) {
+        const needsRefresh = await this._checkIfTokenNeeded(user.user_id);
         if (needsRefresh) {
-          logger.warn('⚠️ [Scheduler] No valid token found during market hours! Triggering immediate refresh.');
-          await this.refreshAllTokens();
-        } else {
-          logger.info('✅ [Scheduler] Valid token exists. No immediate refresh needed.');
+          needsRefreshCount++;
+          logger.warn(`⚠️ [Scheduler] User ${user.user_id} needs token refresh`);
         }
+      }
+
+      if (needsRefreshCount > 0) {
+        logger.warn(`⚠️ [Scheduler] ${needsRefreshCount} users need token refresh. Triggering refresh...`);
+        // Run refresh in background (non-blocking)
+        this.refreshAllTokens().catch(err => {
+          logger.error(`❌ [Scheduler] Startup refresh failed: ${err.message}`);
+        });
+      } else {
+        logger.info('✅ [Scheduler] All users have valid tokens. No startup refresh needed.');
       }
     } catch (error) {
       logger.error(`❌ [Scheduler] Startup check failed: ${error.message}`);
+      // Don't throw - startup check failure shouldn't prevent service from starting
     }
   }
 
   async _checkIfTokenNeeded(userId) {
     try {
       const token = await tokenManager.getValidToken(userId);
-      // specific logic: if no token OR token expires in < 1 hour
+      // specific logic: if no token OR token expires in < 2 hours (proactive buffer)
       if (!token) return true;
 
       const expiresAt = new Date(token.expires_at);
       const now = new Date();
       const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
 
-      return hoursUntilExpiry < 1;
+      // Refresh if expires in less than 2 hours (proactive buffer)
+      return hoursUntilExpiry < 2;
     } catch (e) {
       return true; // fail safe: try to refresh
+    }
+  }
+
+  /**
+   * Proactive refresh: Check for tokens expiring soon and refresh them
+   * This runs every 2 hours to catch tokens before they expire
+   */
+  async refreshExpiringTokens() {
+    if (this.isRunning) {
+      logger.warn('⚠️ Token refresh already in progress, skipping proactive check');
+      return;
+    }
+
+    try {
+      // Get all users with tokens expiring in next 3 hours
+      const result = await db.query(`
+        SELECT DISTINCT st.user_id, st.expires_at, kuc.kite_user_id
+        FROM stored_tokens st
+        INNER JOIN kite_user_credentials kuc ON st.user_id = kuc.user_id
+        WHERE kuc.is_active = true 
+          AND kuc.auto_refresh_enabled = true
+          AND st.expires_at > NOW()
+          AND st.expires_at < NOW() + INTERVAL '3 hours'
+          AND (st.refresh_status IS NULL OR st.refresh_status != 'refreshing')
+        ORDER BY st.expires_at ASC
+      `);
+
+      if (result.rows.length === 0) {
+        logger.info('✅ [Scheduler] No tokens expiring soon (next 3 hours)');
+        return;
+      }
+
+      logger.info(`🔄 [Scheduler] Found ${result.rows.length} tokens expiring soon, refreshing...`);
+
+      for (const row of result.rows) {
+        const expiresAt = new Date(row.expires_at);
+        const now = new Date();
+        const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
+
+        if (hoursUntilExpiry < 2) {
+          logger.info(`⏰ [Scheduler] Token for ${row.user_id} expires in ${hoursUntilExpiry.toFixed(1)} hours, refreshing...`);
+          try {
+            // Mark as refreshing to prevent duplicate refreshes
+            await db.query(`
+              UPDATE stored_tokens 
+              SET refresh_status = 'refreshing', updated_at = NOW()
+              WHERE user_id = $1
+            `, [row.user_id]);
+
+            await tokenManager.refreshTokenForUser(row.user_id);
+            logger.info(`✅ [Scheduler] Proactively refreshed token for ${row.user_id}`);
+            
+            // Small delay between users
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (error) {
+            logger.error(`❌ [Scheduler] Failed to proactively refresh token for ${row.user_id}: ${error.message}`);
+            // Reset status on failure
+            await db.query(`
+              UPDATE stored_tokens 
+              SET refresh_status = 'failed', 
+                  error_reason = $1,
+                  updated_at = NOW()
+              WHERE user_id = $2
+            `, [error.message.substring(0, 500), row.user_id]);
+          }
+        }
+      }
+    } catch (error) {
+      logger.error(`❌ [Scheduler] Error in proactive refresh: ${error.message}`);
     }
   }
 

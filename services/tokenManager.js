@@ -59,10 +59,18 @@ class TokenManager {
           access_token: tokenData.access_token,
           refresh_token: tokenData.refresh_token || '',
           expires_at: tokenData.expires_at,
-          mode: 'automated'
+          mode: 'automated',
+          refresh_status: 'success',
+          error_reason: null
         });
         logger.info(`✅ Token synced to stored_tokens for user: ${userId}`);
       } catch (syncError) {
+        // If table is missing, this is critical - fail the refresh
+        if (syncError.message.includes('stored_tokens table missing') || 
+            syncError.message.includes('relation "stored_tokens" does not exist')) {
+          logger.error(`❌ CRITICAL: Cannot store token - schema incomplete. Failing refresh.`);
+          throw syncError;
+        }
         // Log but don't fail - kite_tokens storage succeeded
         logger.error(`❌ Failed to sync token to stored_tokens for user ${userId}: ${syncError.message}`);
       }
@@ -76,6 +84,22 @@ class TokenManager {
     } catch (error) {
       // Log failure
       await this.logAttempt(userId, attemptNumber || maxAttempts, 'failed', error.message, null);
+
+      // Update stored_tokens with failure status if it exists
+      try {
+        await db.query(`
+          UPDATE stored_tokens 
+          SET refresh_status = 'failed', 
+              error_reason = $1,
+              updated_at = NOW()
+          WHERE user_id = $2
+        `, [error.message.substring(0, 500), userId]);
+      } catch (updateError) {
+        // Ignore if table doesn't exist - will be caught by migration check
+        if (!updateError.message.includes('relation "stored_tokens" does not exist')) {
+          logger.warn(`⚠️ Could not update refresh status: ${updateError.message}`);
+        }
+      }
 
       logger.error(`❌ Token generation failed for user ${userId}: ${error.message}`);
       throw error;
@@ -194,29 +218,48 @@ class TokenManager {
    * @returns {Object} Stored token data
    */
   async storeTokenData(tokenData) {
-    const { user_id, access_token, refresh_token, expires_at, mode } = tokenData;
+    const { user_id, access_token, refresh_token, expires_at, mode, refresh_status, error_reason } = tokenData;
 
     logger.info(`💾 Storing token data for user: ${user_id}`);
 
     try {
-      // Insert or update token data
+      // Insert or update token data with refresh tracking
       const result = await db.query(`
-        INSERT INTO stored_tokens (user_id, access_token, refresh_token, expires_at, mode, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        INSERT INTO stored_tokens (
+          user_id, access_token, refresh_token, expires_at, mode, 
+          last_refresh_at, refresh_status, error_reason, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, NOW(), NOW())
         ON CONFLICT (user_id) 
         DO UPDATE SET 
           access_token = EXCLUDED.access_token,
           refresh_token = EXCLUDED.refresh_token,
           expires_at = EXCLUDED.expires_at,
           mode = EXCLUDED.mode,
+          last_refresh_at = NOW(),
+          refresh_status = COALESCE(EXCLUDED.refresh_status, 'success'),
+          error_reason = NULL,
           updated_at = NOW()
         RETURNING *
-      `, [user_id, access_token, refresh_token, expires_at, mode]);
+      `, [
+        user_id, 
+        access_token, 
+        refresh_token || '', 
+        expires_at, 
+        mode || 'automated',
+        refresh_status || 'success',
+        error_reason || null
+      ]);
 
-      logger.info(`✅ Token data stored successfully for user: ${user_id}`);
+      logger.info(`✅ Token data stored successfully for user: ${user_id} (status: ${refresh_status || 'success'})`);
       return result.rows[0];
 
     } catch (error) {
+      // Check if error is due to missing table
+      if (error.message.includes('relation "stored_tokens" does not exist')) {
+        logger.error(`❌ CRITICAL: stored_tokens table does not exist! This indicates migration failure.`);
+        throw new Error('Database schema incomplete: stored_tokens table missing. Service must restart to run migrations.');
+      }
       logger.error(`❌ Error storing token data for user ${user_id}:`, error);
       throw error;
     }
@@ -238,6 +281,9 @@ class TokenManager {
           refresh_token,
           expires_at,
           mode,
+          last_refresh_at,
+          refresh_status,
+          error_reason,
           created_at,
           updated_at
         FROM stored_tokens
@@ -267,7 +313,8 @@ class TokenManager {
               access_token: kiteToken.access_token,
               refresh_token: '',
               expires_at: kiteToken.expires_at,
-              mode: 'migrated'
+              mode: 'migrated',
+              refresh_status: 'success'
             });
             logger.info(`✅ Migrated token from kite_tokens to stored_tokens for user: ${userId}`);
             
@@ -289,10 +336,28 @@ class TokenManager {
         return null;
       }
 
-      logger.info(`✅ Current token found for user: ${userId}`);
-      return result.rows[0];
+      const token = result.rows[0];
+      
+      // Check if token is expired or expiring soon
+      const expiresAt = new Date(token.expires_at);
+      const now = new Date();
+      const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
+      
+      if (hoursUntilExpiry < 0) {
+        logger.warn(`⚠️ Token for user ${userId} is expired (${hoursUntilExpiry.toFixed(1)} hours ago)`);
+      } else if (hoursUntilExpiry < 2) {
+        logger.warn(`⚠️ Token for user ${userId} expires soon (${hoursUntilExpiry.toFixed(1)} hours)`);
+      }
+
+      logger.info(`✅ Current token found for user: ${userId} (expires in ${hoursUntilExpiry.toFixed(1)} hours)`);
+      return token;
 
     } catch (error) {
+      // Check if error is due to missing table
+      if (error.message.includes('relation "stored_tokens" does not exist')) {
+        logger.error(`❌ CRITICAL: stored_tokens table does not exist! This indicates migration failure.`);
+        throw new Error('Database schema incomplete: stored_tokens table missing. Service must restart to run migrations.');
+      }
       logger.error(`❌ Error getting current token for user ${userId}:`, error);
       throw error;
     }

@@ -240,22 +240,40 @@ class MigrationRunner {
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_generation_logs_created_at ON token_generation_logs(created_at);`);
       logger.info('✅ token_generation_logs table ready');
 
-      // 4. Create stored_tokens table
+      // 4. Create stored_tokens table with enhanced columns for refresh tracking
       await pool.query(`
         CREATE TABLE IF NOT EXISTS stored_tokens (
           id SERIAL PRIMARY KEY,
           user_id VARCHAR(255) NOT NULL UNIQUE,
           access_token TEXT NOT NULL,
           refresh_token TEXT,
-          expires_at TIMESTAMP,
+          expires_at TIMESTAMP NOT NULL,
           mode VARCHAR(50) DEFAULT 'manual',
+          last_refresh_at TIMESTAMP,
+          refresh_status VARCHAR(50) DEFAULT 'pending',
+          error_reason TEXT,
           created_at TIMESTAMP DEFAULT NOW(),
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_user_id ON stored_tokens(user_id);`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_updated_at ON stored_tokens(updated_at);`);
-      logger.info('✅ stored_tokens table ready');
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_expires_at ON stored_tokens(expires_at);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_refresh_status ON stored_tokens(refresh_status);`);
+      
+      // Add new columns if they don't exist (for existing tables)
+      try {
+        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMP;`);
+        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN IF NOT EXISTS refresh_status VARCHAR(50) DEFAULT 'pending';`);
+        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN IF NOT EXISTS error_reason TEXT;`);
+      } catch (alterError) {
+        // Ignore if columns already exist
+        if (!alterError.message.includes('duplicate column')) {
+          logger.warn(`⚠️ Could not add refresh tracking columns: ${alterError.message}`);
+        }
+      }
+      
+      logger.info('✅ stored_tokens table ready with refresh tracking');
 
       // 5. Create update trigger function
       await pool.query(`

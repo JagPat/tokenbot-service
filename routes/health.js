@@ -35,10 +35,33 @@ router.get('/', async (req, res) => {
     logger.error('Health check - database error:', error.message);
   }
 
+  // Verify critical tables exist
+  let tablesExist = false;
+  let missingTables = [];
+  if (dbConnected) {
+    try {
+      const tableCheck = await db.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+      `);
+      const foundTables = tableCheck.rows.map(r => r.table_name);
+      const requiredTables = ['stored_tokens', 'kite_tokens', 'kite_user_credentials'];
+      missingTables = requiredTables.filter(t => !foundTables.includes(t));
+      tablesExist = missingTables.length === 0;
+      
+      if (!tablesExist) {
+        logger.error(`❌ CRITICAL: Missing required tables: ${missingTables.join(', ')}`);
+      }
+    } catch (tableError) {
+      logger.error(`❌ Error checking tables: ${tableError.message}`);
+    }
+  }
+
   // Always return 200, even if database is not connected
   res.status(200).json({
     success: true,
-    status: dbConnected ? 'healthy' : 'limited',
+    status: (dbConnected && tablesExist) ? 'healthy' : 'degraded',
     service: 'tokenbot-service',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
@@ -46,7 +69,9 @@ router.get('/', async (req, res) => {
     database: {
       connected: dbConnected,
       latency_ms: dbLatency,
-      error: dbError
+      error: dbError,
+      tables_exist: tablesExist,
+      missing_tables: missingTables
     },
     environment: {
       has_database_url: !!process.env.DATABASE_URL,
