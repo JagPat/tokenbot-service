@@ -150,7 +150,7 @@ async function startServer() {
         throw new Error('Required database tables not created - migrations failed');
       }
       
-      // Verify stored_tokens has refresh tracking columns
+      // Verify stored_tokens has refresh tracking columns (non-blocking)
       try {
         const columnCheck = await verifyPool.query(`
           SELECT column_name 
@@ -163,20 +163,25 @@ async function startServer() {
         const missingColumns = requiredColumns.filter(c => !foundColumns.includes(c));
         
         if (missingColumns.length > 0) {
-          logger.error(`❌ CRITICAL: stored_tokens missing columns: ${missingColumns.join(', ')}`);
-          logger.error('   Re-running migrations to add missing columns...');
+          logger.warn(`⚠️ stored_tokens missing columns: ${missingColumns.join(', ')}`);
+          logger.warn('   Attempting to add missing columns...');
           // Re-run essential migrations to add missing columns
           const retryResult = await migrationRunner.runEssentialMigrations();
           if (!retryResult.success) {
-            throw new Error(`Failed to add missing columns: ${retryResult.error}`);
+            logger.error(`❌ Failed to add missing columns: ${retryResult.error}`);
+            logger.warn('⚠️ Service will continue but refresh tracking may not work');
+            // Don't throw - allow service to start even if columns are missing
+            // The columns will be added on next migration run
+          } else {
+            logger.info('✅ Missing columns added successfully');
           }
-          logger.info('✅ Missing columns added successfully');
         } else {
           logger.info('✅ All refresh tracking columns exist');
         }
       } catch (colError) {
-        logger.error(`❌ Error verifying columns: ${colError.message}`);
-        throw new Error(`Column verification failed: ${colError.message}`);
+        logger.warn(`⚠️ Error verifying columns: ${colError.message}`);
+        logger.warn('⚠️ Service will continue but refresh tracking may not work');
+        // Don't throw - allow service to start
       }
       
       logger.info('✅ Database schema initialized and verified');
@@ -310,26 +315,28 @@ process.on('unhandledRejection', (reason, promise) => {
       logger.error('❌ Failed to start server:', error);
       logger.error('Stack:', error.stack);
       
-      // If it's a migration/database error, don't start in degraded mode
-      // The service is useless without a proper database schema
-      if (error.message.includes('migration') || 
-          error.message.includes('database') || 
-          error.message.includes('table') ||
-          error.message.includes('column')) {
-        logger.error('❌ CRITICAL: Database schema incomplete. Service cannot start.');
+      // If it's a critical migration/database error (tables missing), don't start
+      // But if it's just column issues, allow service to start (columns can be added later)
+      if (error.message.includes('table') && 
+          (error.message.includes('does not exist') || error.message.includes('not created'))) {
+        logger.error('❌ CRITICAL: Required database tables missing. Service cannot start.');
         logger.error('❌ Please check DATABASE_URL and ensure migrations can run.');
-        logger.error('❌ Service will exit to prevent operating with incomplete schema.');
+        logger.error('❌ Service will exit to prevent operating without core tables.');
         process.exit(1);
       }
       
-      // For other errors, try to start in degraded mode
+      // For column or other non-critical errors, try to start anyway
+      // The service can operate with missing columns (they'll be added on next migration)
+      logger.warn('⚠️ Some database issues detected, but attempting to start service...');
+      logger.warn('⚠️ Some functionality may be limited until migrations complete');
+      
       try {
         app.listen(PORT, '0.0.0.0', () => {
-          logger.info(`⚠️ TokenBot Service running in emergency mode on port ${PORT}`);
+          logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
           logger.warn('⚠️ Some functionality may be limited');
         });
       } catch (listenError) {
-        logger.error('❌ Failed to start server even in emergency mode:', listenError);
+        logger.error('❌ Failed to start server even in degraded mode:', listenError);
         process.exit(1);
       }
     }

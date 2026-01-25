@@ -256,38 +256,78 @@ class MigrationRunner {
       
       // Add refresh tracking columns if they don't exist (for both new and existing tables)
       // PostgreSQL doesn't support IF NOT EXISTS for columns, so we check first
-      const columnCheck = await pool.query(`
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE table_name = 'stored_tokens' 
-        AND column_name IN ('last_refresh_at', 'refresh_status', 'error_reason')
-      `);
-      
-      const existingColumns = columnCheck.rows.map(r => r.column_name);
-      
-      if (!existingColumns.includes('last_refresh_at')) {
-        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN last_refresh_at TIMESTAMP;`);
-        logger.info('✅ Added last_refresh_at column to stored_tokens');
-      }
-      
-      if (!existingColumns.includes('refresh_status')) {
-        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN refresh_status VARCHAR(50) DEFAULT 'pending';`);
-        logger.info('✅ Added refresh_status column to stored_tokens');
-      }
-      
-      if (!existingColumns.includes('error_reason')) {
-        await pool.query(`ALTER TABLE stored_tokens ADD COLUMN error_reason TEXT;`);
-        logger.info('✅ Added error_reason column to stored_tokens');
-      }
-      
-      // Ensure expires_at is NOT NULL (for new tables)
       try {
-        await pool.query(`ALTER TABLE stored_tokens ALTER COLUMN expires_at SET NOT NULL;`);
-      } catch (alterError) {
-        // Ignore if already NOT NULL or column doesn't exist (shouldn't happen)
-        if (!alterError.message.includes('does not exist') && !alterError.message.includes('already')) {
-          logger.warn(`⚠️ Could not set expires_at NOT NULL: ${alterError.message}`);
+        const columnCheck = await pool.query(`
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_name = 'stored_tokens' 
+          AND column_name IN ('last_refresh_at', 'refresh_status', 'error_reason')
+        `);
+        
+        const existingColumns = columnCheck.rows.map(r => r.column_name);
+        
+        if (!existingColumns.includes('last_refresh_at')) {
+          try {
+            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN last_refresh_at TIMESTAMP;`);
+            logger.info('✅ Added last_refresh_at column to stored_tokens');
+          } catch (addError) {
+            // Ignore if column already exists (race condition)
+            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
+              logger.warn(`⚠️ Could not add last_refresh_at: ${addError.message}`);
+            }
+          }
         }
+        
+        if (!existingColumns.includes('refresh_status')) {
+          try {
+            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN refresh_status VARCHAR(50) DEFAULT 'pending';`);
+            logger.info('✅ Added refresh_status column to stored_tokens');
+          } catch (addError) {
+            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
+              logger.warn(`⚠️ Could not add refresh_status: ${addError.message}`);
+            }
+          }
+        }
+        
+        if (!existingColumns.includes('error_reason')) {
+          try {
+            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN error_reason TEXT;`);
+            logger.info('✅ Added error_reason column to stored_tokens');
+          } catch (addError) {
+            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
+              logger.warn(`⚠️ Could not add error_reason: ${addError.message}`);
+            }
+          }
+        }
+      } catch (colError) {
+        // If we can't check columns, try to add them anyway (they'll fail gracefully if they exist)
+        logger.warn(`⚠️ Could not check column existence, attempting to add columns: ${colError.message}`);
+        try {
+          await pool.query(`ALTER TABLE stored_tokens ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMP;`);
+        } catch (e) {
+          // PostgreSQL doesn't support IF NOT EXISTS for columns, so this will fail
+          // But we'll try the direct approach which will fail gracefully if column exists
+          try {
+            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN last_refresh_at TIMESTAMP;`);
+          } catch (e2) {
+            if (!e2.message.includes('already exists')) logger.warn(`⚠️ Could not add last_refresh_at: ${e2.message}`);
+          }
+        }
+      }
+      
+      // Ensure expires_at is NOT NULL (for new tables only, skip for existing)
+      try {
+        const expiresAtCheck = await pool.query(`
+          SELECT is_nullable 
+          FROM information_schema.columns 
+          WHERE table_name = 'stored_tokens' AND column_name = 'expires_at'
+        `);
+        if (expiresAtCheck.rows.length > 0 && expiresAtCheck.rows[0].is_nullable === 'YES') {
+          await pool.query(`ALTER TABLE stored_tokens ALTER COLUMN expires_at SET NOT NULL;`);
+        }
+      } catch (alterError) {
+        // Ignore - expires_at can be nullable for existing data
+        logger.warn(`⚠️ Could not set expires_at NOT NULL: ${alterError.message}`);
       }
       
       // Create indexes
