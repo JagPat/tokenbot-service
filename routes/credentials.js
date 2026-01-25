@@ -289,11 +289,50 @@ router.patch('/api-key', async (req, res, next) => {
       [user_id]
     );
 
+    // If credentials don't exist, create minimal credentials with just API key
+    // This allows API key sync to work even when full credentials aren't set up yet
     if (existing.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Credentials not found. Please create full credentials first via POST /api/credentials'
-      });
+      logger.info(`ℹ️ Credentials not found for user ${user_id}. Creating minimal credentials with API key only.`);
+      
+      // Create minimal credentials - API key is required, other fields can be set later
+      // Use placeholder values that will be updated when full credentials are created
+      const encrypted = {
+        api_key: encryptor.encrypt(api_key),
+        ...(api_secret && { api_secret: encryptor.encrypt(api_secret) })
+      };
+
+      try {
+        await db.query(`
+          INSERT INTO kite_user_credentials (
+            user_id, 
+            kite_user_id, 
+            encrypted_password, 
+            encrypted_totp_secret,
+            encrypted_api_key, 
+            encrypted_api_secret, 
+            is_active,
+            auto_refresh_enabled,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, false, false, NOW(), NOW())
+        `, [
+          user_id,
+          'pending', // Placeholder - will be updated when full credentials are created
+          encryptor.encrypt('pending'), // Placeholder
+          encryptor.encrypt('pending'), // Placeholder
+          encrypted.api_key,
+          encrypted.api_secret || encryptor.encrypt('pending')
+        ]);
+        
+        logger.info(`✅ Created minimal credentials for user ${user_id} with API key. Full credentials can be added later.`);
+      } catch (createError) {
+        logger.error(`❌ Failed to create minimal credentials: ${createError.message}`);
+        return res.status(500).json({
+          success: false,
+          error: `Failed to create credentials: ${createError.message}`
+        });
+      }
     }
 
     // Encrypt API key (and optionally API secret)

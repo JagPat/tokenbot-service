@@ -23,6 +23,13 @@ class TokenManager {
       }
 
       const creds = credsResult.rows[0];
+      
+      // Check if credentials are just placeholders (not fully set up)
+      const decryptedKiteUserId = encryptor.decrypt(creds.encrypted_password);
+      if (decryptedKiteUserId === 'pending_setup' || creds.kite_user_id === 'pending_setup') {
+        throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please create full credentials via POST /api/credentials`);
+      }
+      
       logger.info(`✅ Credentials found for user: ${userId}`);
 
       // Decrypt credentials
