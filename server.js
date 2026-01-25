@@ -145,7 +145,38 @@ async function startServer() {
       
       if (tableCheck.rows.length < 3) {
         logger.error('❌ CRITICAL: Not all required tables exist!');
-        throw new Error('Required database tables not created');
+        logger.error(`   Found tables: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
+        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
+        throw new Error('Required database tables not created - migrations failed');
+      }
+      
+      // Verify stored_tokens has refresh tracking columns
+      try {
+        const columnCheck = await verifyPool.query(`
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_name = 'stored_tokens' 
+          AND column_name IN ('last_refresh_at', 'refresh_status', 'error_reason')
+        `);
+        const foundColumns = columnCheck.rows.map(r => r.column_name);
+        const requiredColumns = ['last_refresh_at', 'refresh_status', 'error_reason'];
+        const missingColumns = requiredColumns.filter(c => !foundColumns.includes(c));
+        
+        if (missingColumns.length > 0) {
+          logger.error(`❌ CRITICAL: stored_tokens missing columns: ${missingColumns.join(', ')}`);
+          logger.error('   Re-running migrations to add missing columns...');
+          // Re-run essential migrations to add missing columns
+          const retryResult = await migrationRunner.runEssentialMigrations();
+          if (!retryResult.success) {
+            throw new Error(`Failed to add missing columns: ${retryResult.error}`);
+          }
+          logger.info('✅ Missing columns added successfully');
+        } else {
+          logger.info('✅ All refresh tracking columns exist');
+        }
+      } catch (colError) {
+        logger.error(`❌ Error verifying columns: ${colError.message}`);
+        throw new Error(`Column verification failed: ${colError.message}`);
       }
       
       logger.info('✅ Database schema initialized and verified');
@@ -275,18 +306,32 @@ process.on('unhandledRejection', (reason, promise) => {
 (async () => {
   try {
     await startServer();
-  } catch (error) {
-    logger.error('❌ Failed to start server:', error);
-    logger.error('Stack:', error.stack);
-    // Try to start server anyway in degraded mode
-    try {
-      app.listen(PORT, '0.0.0.0', () => {
-        logger.info(`⚠️ TokenBot Service running in emergency mode on port ${PORT}`);
-      });
-    } catch (listenError) {
-      logger.error('❌ Failed to start server even in emergency mode:', listenError);
-      process.exit(1);
+    } catch (error) {
+      logger.error('❌ Failed to start server:', error);
+      logger.error('Stack:', error.stack);
+      
+      // If it's a migration/database error, don't start in degraded mode
+      // The service is useless without a proper database schema
+      if (error.message.includes('migration') || 
+          error.message.includes('database') || 
+          error.message.includes('table') ||
+          error.message.includes('column')) {
+        logger.error('❌ CRITICAL: Database schema incomplete. Service cannot start.');
+        logger.error('❌ Please check DATABASE_URL and ensure migrations can run.');
+        logger.error('❌ Service will exit to prevent operating with incomplete schema.');
+        process.exit(1);
+      }
+      
+      // For other errors, try to start in degraded mode
+      try {
+        app.listen(PORT, '0.0.0.0', () => {
+          logger.info(`⚠️ TokenBot Service running in emergency mode on port ${PORT}`);
+          logger.warn('⚠️ Some functionality may be limited');
+        });
+      } catch (listenError) {
+        logger.error('❌ Failed to start server even in emergency mode:', listenError);
+        process.exit(1);
+      }
     }
-  }
 })();
 
