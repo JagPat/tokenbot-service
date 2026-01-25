@@ -104,13 +104,13 @@ async function startServer() {
     try {
       logger.info('🔄 Initializing database schema...');
       logger.info(`📍 DATABASE_URL present: ${!!process.env.DATABASE_URL}`);
-      
+
       // Ensure database pool is initialized
       if (!db.pool) {
         logger.error('❌ Database pool not initialized! Cannot run migrations.');
         throw new Error('Database pool not initialized - check DATABASE_URL and database connection');
       }
-      
+
       // Test database connection before running migrations
       try {
         await db.query('SELECT 1');
@@ -119,12 +119,12 @@ async function startServer() {
         logger.error('❌ Database connection test failed:', connError.message);
         throw new Error(`Database connection failed: ${connError.message}`);
       }
-      
+
       // First, try to run migrations from files
       logger.info('🔄 Step 1: Running file-based migrations...');
       const migrationResult = await migrationRunner.runMigrations();
       logger.info(`📋 File migrations result: ${JSON.stringify(migrationResult)}`);
-      
+
       // ALWAYS run essential migrations as a safety net
       // This ensures critical tables exist even if file migrations fail
       if (!migrationResult.success || migrationResult.reason === 'no_migrations_dir') {
@@ -132,29 +132,29 @@ async function startServer() {
       } else {
         logger.info('✅ File-based migrations completed, verifying with essential migrations...');
       }
-      
+
       // Always run essential migrations to ensure all tables exist
       // Use the shared database pool to ensure we're using the same connection
       logger.info('🔄 Step 2: Running essential (inline) migrations...');
       logger.info('📍 Using shared database pool for migrations...');
       const essentialResult = await migrationRunner.runEssentialMigrations(true, db.pool);
       logger.info(`📋 Essential migrations result: ${JSON.stringify(essentialResult)}`);
-      
+
       if (!essentialResult.success) {
         logger.error('❌ Essential migrations failed:', essentialResult.error);
         throw new Error(`Database migration failed: ${essentialResult.error}`);
       }
-      
+
       // Verify tables exist and check columns (using main db pool)
       logger.info('🔄 Step 3: Verifying tables exist...');
-      
+
       // Wait a moment for any async operations to complete
       await new Promise(resolve => setTimeout(resolve, 1000));
-      
+
       // First, verify which database we're connected to
       const dbInfo = await db.query('SELECT current_database(), current_user');
       logger.info(`📍 Connected to database: ${dbInfo.rows[0].current_database} as ${dbInfo.rows[0].current_user}`);
-      
+
       // Retry table check up to 3 times (in case of timing issues)
       let tableCheck;
       let retries = 3;
@@ -162,7 +162,7 @@ async function startServer() {
         try {
           tableCheck = await db.query(`
             SELECT table_name FROM information_schema.tables 
-            WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+            WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs')
           `);
           break;
         } catch (checkError) {
@@ -172,9 +172,9 @@ async function startServer() {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
-      
+
       logger.info(`✅ Tables found: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
-      
+
       // Also list all tables for debugging
       const allTables = await db.query(`
         SELECT table_name FROM information_schema.tables 
@@ -182,33 +182,33 @@ async function startServer() {
         ORDER BY table_name
       `);
       logger.info(`📋 All tables in database: ${allTables.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
-      
-      if (tableCheck.rows.length < 3) {
+
+      if (tableCheck.rows.length < 4) {
         logger.error('❌ CRITICAL: Not all required tables exist!');
         logger.error(`   Found tables: ${tableCheck.rows.map(r => r.table_name).join(', ') || 'NONE'}`);
-        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
+        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
         logger.error('❌ Attempting to re-run essential migrations...');
-        
+
         // Try one more time with the shared pool
         const retryResult = await migrationRunner.runEssentialMigrations(true, db.pool);
         if (!retryResult.success) {
           throw new Error(`Required database tables not created - migrations failed: ${retryResult.error}`);
         }
-        
+
         // Re-check tables after retry
         await new Promise(resolve => setTimeout(resolve, 1000));
         const retryCheck = await db.query(`
           SELECT table_name FROM information_schema.tables 
-          WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials')
+          WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs')
         `);
-        
-        if (retryCheck.rows.length < 3) {
+
+        if (retryCheck.rows.length < 4) {
           throw new Error(`Required database tables still not created after retry. Found: ${retryCheck.rows.map(r => r.table_name).join(', ')}`);
         }
-        
+
         logger.info('✅ Tables created successfully after retry');
       }
-      
+
       // Verify stored_tokens has refresh tracking columns (non-blocking)
       try {
         const columnCheck = await db.query(`
@@ -220,7 +220,7 @@ async function startServer() {
         const foundColumns = columnCheck.rows.map(r => r.column_name);
         const requiredColumns = ['last_refresh_at', 'refresh_status', 'error_reason'];
         const missingColumns = requiredColumns.filter(c => !foundColumns.includes(c));
-        
+
         if (missingColumns.length > 0) {
           logger.warn(`⚠️ stored_tokens missing columns: ${missingColumns.join(', ')}`);
           logger.warn('   Attempting to add missing columns...');
@@ -242,7 +242,7 @@ async function startServer() {
         logger.warn('⚠️ Service will continue but refresh tracking may not work');
         // Don't throw - allow service to start
       }
-      
+
       logger.info('✅ Database schema initialized and verified');
     } catch (migrationError) {
       logger.error('❌ Migration error:', migrationError.message);
@@ -370,34 +370,34 @@ process.on('unhandledRejection', (reason, promise) => {
 (async () => {
   try {
     await startServer();
-    } catch (error) {
-      logger.error('❌ Failed to start server:', error);
-      logger.error('Stack:', error.stack);
-      
-      // If it's a critical migration/database error (tables missing), don't start
-      // But if it's just column issues, allow service to start (columns can be added later)
-      if (error.message.includes('table') && 
-          (error.message.includes('does not exist') || error.message.includes('not created'))) {
-        logger.error('❌ CRITICAL: Required database tables missing. Service cannot start.');
-        logger.error('❌ Please check DATABASE_URL and ensure migrations can run.');
-        logger.error('❌ Service will exit to prevent operating without core tables.');
-        process.exit(1);
-      }
-      
-      // For column or other non-critical errors, try to start anyway
-      // The service can operate with missing columns (they'll be added on next migration)
-      logger.warn('⚠️ Some database issues detected, but attempting to start service...');
-      logger.warn('⚠️ Some functionality may be limited until migrations complete');
-      
-      try {
-        app.listen(PORT, '0.0.0.0', () => {
-          logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
-          logger.warn('⚠️ Some functionality may be limited');
-        });
-      } catch (listenError) {
-        logger.error('❌ Failed to start server even in degraded mode:', listenError);
-        process.exit(1);
-      }
+  } catch (error) {
+    logger.error('❌ Failed to start server:', error);
+    logger.error('Stack:', error.stack);
+
+    // If it's a critical migration/database error (tables missing), don't start
+    // But if it's just column issues, allow service to start (columns can be added later)
+    if (error.message.includes('table') &&
+      (error.message.includes('does not exist') || error.message.includes('not created'))) {
+      logger.error('❌ CRITICAL: Required database tables missing. Service cannot start.');
+      logger.error('❌ Please check DATABASE_URL and ensure migrations can run.');
+      logger.error('❌ Service will exit to prevent operating without core tables.');
+      process.exit(1);
     }
+
+    // For column or other non-critical errors, try to start anyway
+    // The service can operate with missing columns (they'll be added on next migration)
+    logger.warn('⚠️ Some database issues detected, but attempting to start service...');
+    logger.warn('⚠️ Some functionality may be limited until migrations complete');
+
+    try {
+      app.listen(PORT, '0.0.0.0', () => {
+        logger.info(`⚠️ TokenBot Service running in degraded mode on port ${PORT}`);
+        logger.warn('⚠️ Some functionality may be limited');
+      });
+    } catch (listenError) {
+      logger.error('❌ Failed to start server even in degraded mode:', listenError);
+      process.exit(1);
+    }
+  }
 })();
 

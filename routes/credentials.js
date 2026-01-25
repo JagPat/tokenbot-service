@@ -302,7 +302,7 @@ router.patch('/api-key', async (req, res, next) => {
       };
 
       try {
-        await db.query(`
+        const insertResult = await db.query(`
           INSERT INTO kite_user_credentials (
             user_id, 
             kite_user_id, 
@@ -316,6 +316,7 @@ router.patch('/api-key', async (req, res, next) => {
             updated_at
           )
           VALUES ($1, $2, $3, $4, $5, $6, false, false, NOW(), NOW())
+          RETURNING user_id, kite_user_id, is_active
         `, [
           user_id,
           'pending', // Placeholder - will be updated when full credentials are created
@@ -324,6 +325,9 @@ router.patch('/api-key', async (req, res, next) => {
           encrypted.api_key,
           encrypted.api_secret || encryptor.encrypt('pending')
         ]);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'credentials.js:327',message:'API key sync: Created minimal credentials',data:{userId:user_id,kiteUserId:insertResult.rows[0]?.kite_user_id,isActive:insertResult.rows[0]?.is_active,hasApiKey:!!api_key},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
         
         logger.info(`✅ Created minimal credentials for user ${user_id} with API key. Full credentials can be added later.`);
       } catch (createError) {

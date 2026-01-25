@@ -35,7 +35,7 @@ class MigrationRunner {
   getSSLConfig(connectionString) {
     const isRailwayInternal = connectionString.includes('railway.internal');
     const hasSSLMode = connectionString.includes('sslmode=');
-    
+
     if (hasSSLMode) {
       const sslModeMatch = connectionString.match(/sslmode=([^&]+)/);
       const sslMode = sslModeMatch ? sslModeMatch[1] : '';
@@ -45,7 +45,7 @@ class MigrationRunner {
     } else if (isRailwayInternal) {
       return false;
     }
-    
+
     return false;
   }
 
@@ -139,7 +139,7 @@ class MigrationRunner {
         const sql = fs.readFileSync(migrationPath, 'utf8');
 
         logger.info(`🔄 Running migration: ${file}`);
-        
+
         try {
           await pool.query(sql);
           await this.markMigrationExecuted(pool, file);
@@ -148,8 +148,8 @@ class MigrationRunner {
         } catch (migrationError) {
           // For some errors, we might want to continue (e.g., "relation already exists")
           if (migrationError.code === '42P07' || // duplicate_table
-              migrationError.code === '42710' || // duplicate_object
-              migrationError.message.includes('already exists')) {
+            migrationError.code === '42710' || // duplicate_object
+            migrationError.message.includes('already exists')) {
             logger.warn(`⚠️ Migration ${file} skipped (object already exists)`);
             await this.markMigrationExecuted(pool, file);
             executed.push(file);
@@ -189,7 +189,7 @@ class MigrationRunner {
     // Use shared pool if provided, otherwise create new one
     let pool = sharedPool;
     let shouldClosePool = false;
-    
+
     if (!useSharedPool || !sharedPool) {
       const connectionString = process.env.DATABASE_URL;
       const sslConfig = this.getSSLConfig(connectionString);
@@ -205,77 +205,57 @@ class MigrationRunner {
         idleTimeoutMillis: 10000,
         connectionTimeoutMillis: 10000, // Increased timeout
       });
-      shouldClosePool = true;
-    }
+      const pool = useSharedPool && sharedPool ? sharedPool : this.pool;
+      if (!pool) {
+        logger.error('❌ Cannot run essential migrations: Database pool not initialized');
+        return { success: false, error: 'DB pool missing' };
+      }
 
-    try {
-      // Verify we're connected to the right database
-      const dbCheck = await pool.query('SELECT current_database(), current_user, version()');
-      logger.info(`✅ Connected to database: ${dbCheck.rows[0].current_database}`);
-      logger.info(`✅ Connected as user: ${dbCheck.rows[0].current_user}`);
-      
-      logger.info('🔄 Running essential database migrations (inline)...');
+      logger.info('🛡️ Running ESSENTIAL migrations (Fail-safe mode)...');
 
-      // 1. Create kite_user_credentials table
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS kite_user_credentials (
+      try {
+        // 1. Create _migrations table
+        await pool.query(`
+        CREATE TABLE IF NOT EXISTS public._migrations (
+          id SERIAL PRIMARY KEY,
+          migration_name VARCHAR(255) NOT NULL UNIQUE,
+          executed_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+        logger.info('✅ Verified _migrations table');
+
+        // 2. Create kite_user_credentials table
+        await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.kite_user_credentials (
           id SERIAL PRIMARY KEY,
           user_id VARCHAR(255) NOT NULL UNIQUE,
-          kite_user_id VARCHAR(100) NOT NULL,
-          encrypted_password TEXT NOT NULL,
-          encrypted_totp_secret TEXT NOT NULL,
-          encrypted_api_key TEXT NOT NULL,
-          encrypted_api_secret TEXT NOT NULL,
-          is_active BOOLEAN DEFAULT true,
-          auto_refresh_enabled BOOLEAN DEFAULT true,
-          last_used TIMESTAMP,
+          api_key VARCHAR(255) NOT NULL,
+          api_secret VARCHAR(255) NOT NULL,
+          redirect_url VARCHAR(255) DEFAULT 'http://localhost:3000/api/kite/callback',
           created_at TIMESTAMP DEFAULT NOW(),
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_user_credentials_user_id ON kite_user_credentials(user_id);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_user_credentials_is_active ON kite_user_credentials(is_active);`);
-      logger.info('✅ kite_user_credentials table ready');
+        logger.info('✅ Verified kite_user_credentials table');
 
-      // 2. Create kite_tokens table
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS kite_tokens (
+        // 3. Create kite_tokens table
+        await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.kite_tokens (
           id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) NOT NULL,
+          user_id VARCHAR(255) NOT NULL UNIQUE,
           access_token TEXT NOT NULL,
           public_token TEXT,
-          login_time TIMESTAMP,
+          login_time TIMESTAMP DEFAULT NOW(),
           expires_at TIMESTAMP,
-          generation_method VARCHAR(50) DEFAULT 'manual',
-          is_valid BOOLEAN DEFAULT true,
           created_at TIMESTAMP DEFAULT NOW(),
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_user_id ON kite_tokens(user_id);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_is_valid ON kite_tokens(is_valid);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_kite_tokens_expires_at ON kite_tokens(expires_at);`);
-      logger.info('✅ kite_tokens table ready');
+        logger.info('✅ Verified kite_tokens table');
 
-      // 3. Create token_generation_logs table
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS token_generation_logs (
-          id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) NOT NULL,
-          attempt_number INTEGER NOT NULL,
-          status VARCHAR(50) NOT NULL,
-          error_message TEXT,
-          execution_time_ms INTEGER,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_generation_logs_user_id ON token_generation_logs(user_id);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_generation_logs_created_at ON token_generation_logs(created_at);`);
-      logger.info('✅ token_generation_logs table ready');
-
-      // 4. Create stored_tokens table (basic structure first)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS stored_tokens (
+        // 4. Create stored_tokens table
+        await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.stored_tokens (
           id SERIAL PRIMARY KEY,
           user_id VARCHAR(255) NOT NULL UNIQUE,
           access_token TEXT NOT NULL,
@@ -286,121 +266,31 @@ class MigrationRunner {
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
-      
-      // Add refresh tracking columns if they don't exist (for both new and existing tables)
-      // PostgreSQL doesn't support IF NOT EXISTS for columns, so we check first
-      try {
-        const columnCheck = await pool.query(`
-          SELECT column_name 
-          FROM information_schema.columns 
-          WHERE table_name = 'stored_tokens' 
-          AND column_name IN ('last_refresh_at', 'refresh_status', 'error_reason')
-        `);
-        
-        const existingColumns = columnCheck.rows.map(r => r.column_name);
-        
-        if (!existingColumns.includes('last_refresh_at')) {
-          try {
-            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN last_refresh_at TIMESTAMP;`);
-            logger.info('✅ Added last_refresh_at column to stored_tokens');
-          } catch (addError) {
-            // Ignore if column already exists (race condition)
-            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
-              logger.warn(`⚠️ Could not add last_refresh_at: ${addError.message}`);
-            }
-          }
-        }
-        
-        if (!existingColumns.includes('refresh_status')) {
-          try {
-            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN refresh_status VARCHAR(50) DEFAULT 'pending';`);
-            logger.info('✅ Added refresh_status column to stored_tokens');
-          } catch (addError) {
-            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
-              logger.warn(`⚠️ Could not add refresh_status: ${addError.message}`);
-            }
-          }
-        }
-        
-        if (!existingColumns.includes('error_reason')) {
-          try {
-            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN error_reason TEXT;`);
-            logger.info('✅ Added error_reason column to stored_tokens');
-          } catch (addError) {
-            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
-              logger.warn(`⚠️ Could not add error_reason: ${addError.message}`);
-            }
-          }
-        }
-      } catch (colError) {
-        // If we can't check columns, try to add them anyway (they'll fail gracefully if they exist)
-        logger.warn(`⚠️ Could not check column existence, attempting to add columns: ${colError.message}`);
-        try {
-          await pool.query(`ALTER TABLE stored_tokens ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMP;`);
-        } catch (e) {
-          // PostgreSQL doesn't support IF NOT EXISTS for columns, so this will fail
-          // But we'll try the direct approach which will fail gracefully if column exists
-          try {
-            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN last_refresh_at TIMESTAMP;`);
-          } catch (e2) {
-            if (!e2.message.includes('already exists')) logger.warn(`⚠️ Could not add last_refresh_at: ${e2.message}`);
-          }
-        }
-      }
-      
-      // Ensure expires_at is NOT NULL (for new tables only, skip for existing)
-      try {
-        const expiresAtCheck = await pool.query(`
-          SELECT is_nullable 
-          FROM information_schema.columns 
-          WHERE table_name = 'stored_tokens' AND column_name = 'expires_at'
-        `);
-        if (expiresAtCheck.rows.length > 0 && expiresAtCheck.rows[0].is_nullable === 'YES') {
-          await pool.query(`ALTER TABLE stored_tokens ALTER COLUMN expires_at SET NOT NULL;`);
-        }
-      } catch (alterError) {
-        // Ignore - expires_at can be nullable for existing data
-        logger.warn(`⚠️ Could not set expires_at NOT NULL: ${alterError.message}`);
-      }
-      
-      // Create indexes
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_user_id ON stored_tokens(user_id);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_updated_at ON stored_tokens(updated_at);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_expires_at ON stored_tokens(expires_at);`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_refresh_status ON stored_tokens(refresh_status);`);
-      
-      logger.info('✅ stored_tokens table ready with refresh tracking');
+        logger.info('✅ Verified stored_tokens table');
 
-      // 5. Create update trigger function
-      await pool.query(`
-        CREATE OR REPLACE FUNCTION update_updated_at_column()
-        RETURNS TRIGGER AS $$
-        BEGIN
-            NEW.updated_at = NOW();
-            RETURN NEW;
-        END;
-        $$ language 'plpgsql';
+        // 5. Create token_generation_logs table
+        await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.token_generation_logs (
+            id SERIAL PRIMARY KEY,
+            user_id VARCHAR(255),
+            status VARCHAR(50) NOT NULL,
+            message TEXT,
+            timestamp TIMESTAMP DEFAULT NOW()
+        );
       `);
-      logger.info('✅ Trigger function ready');
+        logger.info('✅ Verified token_generation_logs table');
 
-      return { success: true };
-
-    } catch (error) {
-      logger.error('❌ Essential migrations failed:', error.message);
-      logger.error('❌ Migration error stack:', error.stack);
-      return { success: false, error: error.message };
-    } finally {
-      // Only close pool if we created it (not if it's shared)
-      if (shouldClosePool && pool) {
-        try {
+        return { success: true };
+      } catch (error) {
+        logger.error('❌ Essential migrations failed:', error.message);
+        return { success: false, error: error.message };
+      } finally {
+        // Do not close shared pool
+        if (!useSharedPool && pool && this.pool !== pool) {
           await pool.end();
-          logger.info('✅ Migration pool closed');
-        } catch (closeError) {
-          logger.warn(`⚠️ Error closing migration pool: ${closeError.message}`);
         }
       }
     }
   }
-}
 
 module.exports = new MigrationRunner();

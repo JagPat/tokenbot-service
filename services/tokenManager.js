@@ -11,14 +11,46 @@ class TokenManager {
 
     try {
       logger.info(`🔄 Starting token refresh for user: ${userId}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:13',message:'refreshTokenForUser: Entry',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
 
-      // Get encrypted credentials
-      const credsResult = await db.query(
+      // Get encrypted credentials - first check active, then check inactive if needed
+      let credsResult = await db.query(
         `SELECT * FROM kite_user_credentials WHERE user_id = $1 AND is_active = true`,
         [userId]
       );
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:20',message:'refreshTokenForUser: Active credentials query result',data:{activeCount:credsResult.rows.length,hasResults:credsResult.rows.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
 
+      // If no active credentials, check for inactive ones (might be incomplete)
       if (credsResult.rows.length === 0) {
+        const inactiveResult = await db.query(
+          `SELECT * FROM kite_user_credentials WHERE user_id = $1 AND is_active = false`,
+          [userId]
+        );
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:27',message:'refreshTokenForUser: Inactive credentials check',data:{inactiveCount:inactiveResult.rows.length,hasInactive:inactiveResult.rows.length>0,kiteUserId:inactiveResult.rows[0]?.kite_user_id||'none'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        
+        if (inactiveResult.rows.length > 0) {
+          const inactiveCreds = inactiveResult.rows[0];
+          // Check if credentials are incomplete (placeholders)
+          if (inactiveCreds.kite_user_id === 'pending' || inactiveCreds.kite_user_id === 'pending_setup') {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:33',message:'refreshTokenForUser: Incomplete credentials detected',data:{kiteUserId:inactiveCreds.kite_user_id,isActive:inactiveCreds.is_active},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+            throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please use POST /api/credentials to set them up.`);
+          }
+          // If inactive but complete, they might have been deactivated - still can't use them
+          throw new Error(`Credentials for user ${userId} exist but are marked as inactive. Please activate them or create new credentials via POST /api/credentials`);
+        }
+        
+        // No credentials at all (neither active nor inactive)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenManager.js:42',message:'refreshTokenForUser: No credentials found at all',data:{userId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
         throw new Error(`No active credentials found for user ${userId}. Please configure full credentials via POST /api/credentials`);
       }
 
