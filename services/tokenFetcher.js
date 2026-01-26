@@ -383,12 +383,13 @@ class TokenFetcher {
 
       // Wait for navigation and verify we're on TOTP page
       logger.info('⏳ Waiting for TOTP page to load...');
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for dynamic content
+      // OPTIMIZATION: Removed hardcoded 5s wait. Rely on polling loop for faster detection.
 
       // Wait for TOTP input field to appear (it might be rendered dynamically)
       logger.info('⏳ Waiting for TOTP input field to appear...');
       let totpFieldAppeared = false;
-      for (let attempt = 0; attempt < 10; attempt++) {
+      // Increased attempts to 15 to cover the removed wait time, check every 1s
+      for (let attempt = 0; attempt < 15; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between attempts
 
         const totpFieldExists = await page.evaluate(() => {
