@@ -420,7 +420,7 @@ class TokenFetcher {
       }
 
       if (!totpFieldAppeared) {
-        logger.warn('⚠️ TOTP field not detected after waiting. Continuing to search...');
+        logger.info('ℹ️ TOTP field not detected after initial wait. Continuing search...');
       }
 
       // Verify we're on the TOTP page by checking URL or page content
@@ -743,7 +743,7 @@ class TokenFetcher {
 
       // Fallback: Press Enter if no submit button found
       if (!submitButtonClicked) {
-        logger.warn('⚠️ Submit button not found, pressing Enter key');
+        logger.info('ℹ️ Submit button not found, pressing Enter key to submit');
         await page.keyboard.press('Enter');
       }
 

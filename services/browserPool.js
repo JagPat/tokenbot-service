@@ -219,7 +219,7 @@ class BrowserPool {
       const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
 
       browser = await puppeteer.launch({
-        headless: true,
+        headless: 'new',
         executablePath: executablePath, // CRITICAL: Explicitly set Chrome path
         protocolTimeout: 240000, // Increased to 4 minutes for slow startup
         timeout: 180000, // Increased to 3 minutes
