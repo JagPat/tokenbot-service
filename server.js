@@ -139,8 +139,13 @@ async function initializeServices() {
         if (!retryResult.success) {
           logger.error('❌ Migration retry failed - service may not function correctly');
         }
+        const credentialLoader = require('./services/credentialLoader');
+        await credentialLoader.syncFromEnv();
       } else {
         logger.info('✅ All required tables verified');
+        // Try to sync credentials even if tables existed before
+        const credentialLoader = require('./services/credentialLoader');
+        await credentialLoader.syncFromEnv();
       }
 
     } catch (dbError) {
