@@ -128,12 +128,12 @@ async function initializeServices() {
       // Verify Tables
       const tableCheck = await db.query(`
         SELECT table_name FROM information_schema.tables 
-        WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs')
+        WHERE table_schema = 'public' AND table_name IN ('stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs', 'BrokerConnection')
       `);
 
-      if (tableCheck.rows.length < 4) {
+      if (tableCheck.rows.length < 5) {
         logger.error(`❌ Missing tables. Found: ${tableCheck.rows.map(r => r.table_name).join(', ')}`);
-        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
+        logger.error(`   Missing: ${['stored_tokens', 'kite_tokens', 'kite_user_credentials', 'token_generation_logs', 'BrokerConnection'].filter(t => !tableCheck.rows.some(r => r.table_name === t)).join(', ')}`);
         // Try retry once
         const retryResult = await migrationRunner.runEssentialMigrations(true, db.pool);
         if (!retryResult.success) {

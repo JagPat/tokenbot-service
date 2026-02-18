@@ -5,6 +5,25 @@ const encryptor = require('../services/encryptor');
 const { authenticateUser } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
+function resolveServiceUserId() {
+  const candidate =
+    process.env.TOKENBOT_SERVICE_USER_ID ||
+    process.env.SERVICE_USER_ID ||
+    process.env.SYSTEM_USER_ID ||
+    process.env.JOB_USER_ID ||
+    (process.env.NODE_ENV !== 'production' ? process.env.USER_ID : null);
+
+  if (candidate && String(candidate).trim()) {
+    return String(candidate).trim();
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    return 'local-dev-user';
+  }
+
+  return null;
+}
+
 /**
  * POST /api/credentials
  * Save/update user credentials (supports both user and service authentication)
@@ -272,7 +291,16 @@ router.patch('/api-key', async (req, res, next) => {
       });
     }
 
-    const { user_id = 'default', api_key, api_secret } = req.body;
+    const requestedUserId = req.body.user_id || req.query.user_id || resolveServiceUserId();
+    const user_id = requestedUserId ? String(requestedUserId).trim() : null;
+    const { api_key, api_secret } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'user_id is required (or configure TOKENBOT_SERVICE_USER_ID in production)'
+      });
+    }
     
     if (!api_key) {
       return res.status(400).json({
@@ -325,10 +353,6 @@ router.patch('/api-key', async (req, res, next) => {
           encrypted.api_key,
           encrypted.api_secret || encryptor.encrypt('pending')
         ]);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'credentials.js:327',message:'API key sync: Created minimal credentials',data:{userId:user_id,kiteUserId:insertResult.rows[0]?.kite_user_id,isActive:insertResult.rows[0]?.is_active,hasApiKey:!!api_key},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
         logger.info(`✅ Created minimal credentials for user ${user_id} with API key. Full credentials can be added later.`);
       } catch (createError) {
         logger.error(`❌ Failed to create minimal credentials: ${createError.message}`);
@@ -385,4 +409,3 @@ router.patch('/api-key', async (req, res, next) => {
 });
 
 module.exports = router;
-

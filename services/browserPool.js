@@ -1,7 +1,11 @@
 /**
  * Browser Pool Service
- * Manages reusable browser instances to reduce memory pressure
- * Implements connection pooling pattern for Puppeteer browsers
+ *
+ * Self-healing browser pool for Puppeteer with:
+ * - circuit breaker with HALF_OPEN probes
+ * - bounded backpressure queue
+ * - stale lease cleanup
+ * - pool reset + healing metrics
  */
 
 const puppeteer = require('puppeteer');
@@ -11,541 +15,583 @@ const crypto = require('crypto');
 
 class BrowserPool {
   constructor(options = {}) {
-    this.maxPoolSize = parseInt(options.maxPoolSize) || 2; // Increased to 2 for parallel operations
-    this.idleTimeout = parseInt(options.idleTimeout) || 300000; // 5 minutes idle timeout
-    this.maxAge = parseInt(options.maxAge) || 1800000; // 30 minutes max age
+    this.maxPoolSize = Math.max(1, parseInt(options.maxPoolSize || '2', 10));
+    this.idleTimeout = Math.max(1000, parseInt(options.idleTimeout || '300000', 10));
+    this.maxAge = Math.max(30000, parseInt(options.maxAge || '1800000', 10));
 
-    // Validate configuration
-    if (this.maxPoolSize < 1) this.maxPoolSize = 1;
-    if (this.idleTimeout < 1000) this.idleTimeout = 300000;
+    this.maxQueueSize = Math.max(1, parseInt(options.maxQueueSize || '20', 10));
+    this.acquireTimeoutMs = Math.max(1000, parseInt(options.acquireTimeoutMs || '45000', 10));
+    this.staleLeaseMs = Math.max(60000, parseInt(options.staleLeaseMs || '300000', 10));
 
     this.pool = [];
-    // Map<browserId, requestId> - Tracks which request owns which browser
+    // Map<browserId, { requestId, acquiredAt }>
     this.activeBrowsers = new Map();
+    this.pendingQueue = [];
 
     this.stats = {
       created: 0,
       reused: 0,
       closed: 0,
       errors: 0,
-      memoryPressure: 0
-    };
-    this.circuitBreaker = {
-      failures: 0,
-      lastFailure: null,
-      state: 'CLOSED', // CLOSED, OPEN, HALF_OPEN
-      threshold: 3,
-      resetTimeout: 60000 // 1 minute
+      memoryPressure: 0,
+      queueRejected: 0,
+      queueTimedOut: 0,
+      halfOpenProbes: 0,
+      healingResets: 0,
+      circuitTrips: 0,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastFailureReason: null
     };
 
-    // Start cleanup interval
+    this.circuitBreaker = {
+      state: 'CLOSED', // CLOSED, OPEN, HALF_OPEN
+      failures: 0,
+      threshold: parseInt(options.failureThreshold || '3', 10),
+      resetTimeout: parseInt(options.resetTimeout || '60000', 10),
+      openedAt: null,
+      halfOpenInFlight: false,
+      consecutiveHalfOpenSuccesses: 0,
+      successThreshold: parseInt(options.halfOpenSuccessThreshold || '1', 10)
+    };
+
     this.cleanupInterval = setInterval(async () => {
       try {
         await this.cleanup();
       } catch (error) {
-        logger.error(`Cleanup interval error: ${error.message}`, error);
+        logger.error(`Cleanup interval error: ${error.message}`);
       }
-    }, 60000); // Every minute
+    }, 60000);
 
-    // Monitor memory pressure
-    this.memoryCheckInterval = setInterval(() => this.checkMemoryPressure(), 30000); // Every 30 seconds
+    this.memoryCheckInterval = setInterval(() => this.checkMemoryPressure(), 30000);
+
+    // Frequent healing loop for breaker probes + queue drain.
+    this.healInterval = setInterval(async () => {
+      try {
+        await this.runSelfHeal();
+      } catch (error) {
+        logger.error(`Self-heal loop error: ${error.message}`);
+      }
+    }, 15000);
   }
 
-  /**
-   * Get optimal browser launch args for Railway containerized environment
-   */
   getBrowserArgs() {
     return [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', // CRITICAL: Single process mode saves memory
-      '--disable-gpu',
+      '--single-process',
       '--disable-extensions',
-      '--disable-software-rasterizer',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-features=TranslateUI',
-      '--disable-ipc-flooding-protection',
       '--disable-background-networking',
-      '--disable-default-apps',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
       '--disable-sync',
-      '--metrics-recording-only',
       '--mute-audio',
-      '--no-default-browser-check',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-breakpad',
-      '--disable-crash-reporter',
-      '--disable-crashpad',
-      '--disable-in-process-stack-traces',
-      '--disable-logging',
-      '--log-level=3',
-      '--disable-features=VizDisplayCompositor',
-      '--disable-features=Crashpad,CrashReporting',
-      // Additional memory optimizations
-      '--disable-javascript-harmony-shipping',
-      '--disable-client-side-phishing-detection',
-      '--disable-component-update',
-      '--disable-domain-reliability',
-      '--disable-features=AudioServiceOutOfProcess',
-      '--disable-hang-monitor',
-      '--disable-prompt-on-repost',
-      '--disable-speech-api',
-      '--disable-web-security', // Only for internal automation
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--js-flags=--max-old-space-size=512' // Increased from 128 to 512 for stability
+      '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+      '--js-flags=--max-old-space-size=512'
     ];
   }
 
-  /**
-   * Check if system has enough memory for browser launch
-   */
   checkMemoryPressure() {
     try {
       const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const usedMem = totalMem - freeMem;
-      const memUsagePercent = (usedMem / totalMem) * 100;
+      const usedMem = totalMem - os.freemem();
+      const usagePercent = (usedMem / totalMem) * 100;
 
-      // Log memory stats periodically
-      if (this.stats.created % 5 === 0) {
-        logger.info(`💾 Memory: ${(usedMem / 1024 / 1024 / 1024).toFixed(2)}GB used / ${(totalMem / 1024 / 1024 / 1024).toFixed(2)}GB total (${memUsagePercent.toFixed(1)}%)`);
-      }
-
-      // If memory usage > 85%, mark as pressure
-      if (memUsagePercent > 85) {
-        this.stats.memoryPressure++;
-        logger.warn(`⚠️ High memory pressure: ${memUsagePercent.toFixed(1)}% used`);
+      if (usagePercent > 85) {
+        this.stats.memoryPressure += 1;
+        logger.warn(`High memory pressure: ${usagePercent.toFixed(1)}%`);
         return true;
       }
 
       return false;
     } catch (error) {
-      logger.warn(`Failed to check memory: ${error.message}`);
+      logger.warn(`Failed to check memory pressure: ${error.message}`);
       return false;
     }
   }
 
-  /**
-   * Check circuit breaker state
-   */
-  checkCircuitBreaker() {
-    const { state, failures, lastFailure, resetTimeout } = this.circuitBreaker;
-
-    if (state === 'OPEN') {
-      if (lastFailure && Date.now() - lastFailure > resetTimeout) {
-        logger.info('🔄 Circuit breaker: Moving to HALF_OPEN state');
-        this.circuitBreaker.state = 'HALF_OPEN';
-        return false; // Allow one attempt
-      }
-      logger.warn('🚫 Circuit breaker: OPEN - browser launches blocked');
-      return true; // Block launches
+  _transitionToOpen(reason) {
+    if (this.circuitBreaker.state !== 'OPEN') {
+      this.stats.circuitTrips += 1;
     }
 
-    return false; // Allow launches
+    this.circuitBreaker.state = 'OPEN';
+    this.circuitBreaker.openedAt = Date.now();
+    this.circuitBreaker.halfOpenInFlight = false;
+    this.circuitBreaker.consecutiveHalfOpenSuccesses = 0;
+    this.stats.lastFailureReason = reason || 'unknown';
+    this.stats.lastFailureAt = new Date().toISOString();
+
+    logger.error(`Circuit breaker OPENED: ${this.stats.lastFailureReason}`);
   }
 
-  /**
-   * Record circuit breaker failure
-   */
-  recordFailure() {
-    this.circuitBreaker.failures++;
-    this.circuitBreaker.lastFailure = Date.now();
-
-    if (this.circuitBreaker.failures >= this.circuitBreaker.threshold) {
-      this.circuitBreaker.state = 'OPEN';
-      logger.error(`🚫 Circuit breaker: OPENED after ${this.circuitBreaker.failures} failures`);
-    }
-  }
-
-  /**
-   * Record circuit breaker success
-   */
-  recordSuccess() {
-    // Reset failures on any success to allow recovery from transient errors
-    if (this.circuitBreaker.failures > 0) {
-      this.circuitBreaker.failures = 0;
-    }
+  _recordFailure(error) {
+    const reason = error?.message || 'unknown browser failure';
+    this.circuitBreaker.failures += 1;
 
     if (this.circuitBreaker.state === 'HALF_OPEN') {
-      logger.info('✅ Circuit breaker: Moving to CLOSED state');
-      this.circuitBreaker.state = 'CLOSED';
+      this._transitionToOpen(`HALF_OPEN probe failed: ${reason}`);
+      return;
+    }
+
+    if (this.circuitBreaker.failures >= this.circuitBreaker.threshold) {
+      this._transitionToOpen(reason);
+    } else {
+      this.stats.lastFailureReason = reason;
+      this.stats.lastFailureAt = new Date().toISOString();
     }
   }
 
-  /**
-   * Create a new browser instance
-   */
-  async createBrowser() {
-    // Check circuit breaker
-    if (this.checkCircuitBreaker()) {
-      throw new Error('Browser launch blocked by circuit breaker. System recovering from failures.');
+  _recordSuccess() {
+    this.circuitBreaker.failures = 0;
+    this.stats.lastSuccessAt = new Date().toISOString();
+
+    if (this.circuitBreaker.state === 'HALF_OPEN') {
+      this.circuitBreaker.consecutiveHalfOpenSuccesses += 1;
+      if (this.circuitBreaker.consecutiveHalfOpenSuccesses >= this.circuitBreaker.successThreshold) {
+        this.circuitBreaker.state = 'CLOSED';
+        this.circuitBreaker.openedAt = null;
+        this.circuitBreaker.halfOpenInFlight = false;
+        this.circuitBreaker.consecutiveHalfOpenSuccesses = 0;
+        logger.info('Circuit breaker CLOSED after successful HALF_OPEN probe');
+      }
+    }
+  }
+
+  _isLaunchBlocked() {
+    const breaker = this.circuitBreaker;
+
+    if (breaker.state !== 'OPEN') {
+      return false;
     }
 
-    // Check memory pressure
-    if (this.checkMemoryPressure()) {
-      logger.warn('⚠️ High memory pressure detected, delaying browser creation');
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+    if (!breaker.openedAt) {
+      return true;
+    }
 
-      // Check again
+    const elapsed = Date.now() - breaker.openedAt;
+    if (elapsed >= breaker.resetTimeout) {
+      breaker.state = 'HALF_OPEN';
+      breaker.halfOpenInFlight = false;
+      breaker.consecutiveHalfOpenSuccesses = 0;
+      logger.info('Circuit breaker OPEN -> HALF_OPEN (probe window)');
+      return false;
+    }
+
+    return true;
+  }
+
+  _buildBlockedError(prefix) {
+    const breaker = this.circuitBreaker;
+    const openedAt = breaker.openedAt || Date.now();
+    const retryInMs = Math.max(0, breaker.resetTimeout - (Date.now() - openedAt));
+    const retryInSec = Math.ceil(retryInMs / 1000);
+    const reason = this.stats.lastFailureReason || 'browser failures';
+
+    return new Error(`${prefix}: circuit breaker ${breaker.state} (retry in ${retryInSec}s, reason: ${reason})`);
+  }
+
+  async _createBrowser({ isProbe = false } = {}) {
+    if (!isProbe && this._isLaunchBlocked()) {
+      throw this._buildBlockedError('Browser launch blocked');
+    }
+
+    if (this.checkMemoryPressure()) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       if (this.checkMemoryPressure()) {
-        throw new Error('Insufficient memory for browser launch. Please try again later.');
+        throw new Error('Insufficient memory for browser launch');
       }
     }
 
-    const startTime = Date.now();
-    let browser = null;
+    const breaker = this.circuitBreaker;
+    if (breaker.state === 'HALF_OPEN') {
+      if (breaker.halfOpenInFlight) {
+        throw new Error('HALF_OPEN probe already in flight');
+      }
+      breaker.halfOpenInFlight = true;
+      this.stats.halfOpenProbes += 1;
+    }
+
+    const start = Date.now();
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
 
     try {
-      logger.info('🚀 Creating new browser instance...');
-
-      // Standardizing args for official Docker image
-      const args = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-zygote'
-      ];
-
-      // Create browser with explicit executablePath for Docker image
-      // Use system Chrome from Puppeteer Docker image
-      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
-
-      browser = await puppeteer.launch({
+      const browser = await puppeteer.launch({
         headless: 'new',
-        executablePath: executablePath, // CRITICAL: Explicitly set Chrome path
-        protocolTimeout: 240000, // Increased to 4 minutes for slow startup
-        timeout: 180000, // Increased to 3 minutes
-        args: args,
+        executablePath,
+        protocolTimeout: 240000,
+        timeout: 180000,
+        args: this.getBrowserArgs(),
         ignoreHTTPSErrors: true,
-        dumpio: true, // Output Chrome logs to stdout for debugging
+        dumpio: true,
         env: {
           ...process.env,
           NODE_OPTIONS: undefined
         }
       });
 
-      const launchTime = Date.now() - startTime;
-      logger.info(`✅ Browser created successfully in ${launchTime}ms`);
-
-      this.stats.created++;
-      this.recordSuccess();
-
-      // Track browser
       const browserInfo = {
         browser,
         createdAt: Date.now(),
         lastUsed: Date.now(),
         useCount: 0,
-        id: `browser-${crypto.randomUUID()}`, // Use crypto for safer ID
+        id: `browser-${crypto.randomUUID()}`,
         markedForRemoval: false
       };
 
-      // Monitor browser process
       browser.on('disconnected', () => {
-        logger.info(`🔌 Browser ${browserInfo.id} disconnected`);
-        // Don't remove immediately if it's currently in use (active)
-        // Just mark it, and it will be cleaned up on release() or next cleanup() cycle
-        if (this.activeBrowsers.has(browserInfo.id)) {
-          logger.warn(`⚠️ Browser ${browserInfo.id} disconnected while active! Marking for removal.`);
-          browserInfo.markedForRemoval = true;
-        } else {
-          // Safe to remove if idle
-          this.removeBrowser(browserInfo.id).catch(err => {
-            logger.error(`Error removing disconnected browser: ${err.message}`);
+        browserInfo.markedForRemoval = true;
+        if (!this.activeBrowsers.has(browserInfo.id)) {
+          this.removeBrowser(browserInfo.id).catch((error) => {
+            logger.error(`Error removing disconnected browser: ${error.message}`);
           });
         }
       });
 
+      this.stats.created += 1;
+      this._recordSuccess();
+
+      logger.info(`Browser created in ${Date.now() - start}ms${isProbe ? ' (probe)' : ''}`);
       return browserInfo;
-
     } catch (error) {
-      const launchTime = Date.now() - startTime;
-      logger.error(`❌ Browser creation failed after ${launchTime}ms: ${error.message}`);
-
-      this.stats.errors++;
-      this.recordFailure();
-
-      // Enhanced error context
-      if (error.message?.includes('Resource temporarily unavailable') ||
-        error.message?.includes('ENOMEM') ||
-        error.message?.includes('Cannot allocate memory')) {
-        throw new Error('Browser launch failed due to insufficient resources. Railway container may need more memory/CPU allocated.');
-      }
-
+      this.stats.errors += 1;
+      this._recordFailure(error);
+      logger.error(`Browser creation failed after ${Date.now() - start}ms: ${error.message}`);
       throw error;
+    } finally {
+      if (breaker.state === 'HALF_OPEN') {
+        breaker.halfOpenInFlight = false;
+      }
     }
   }
 
-  /**
-   * Helper to atomically find an available browser and lock it
-   * This ensures no race condition between finding and setting the active state
-   */
-  findAndLock(requestId) {
-    // Single synchronous pass to find and lock
-    // This atomic operation prevents race conditions in single-threaded JS
-    for (const browserInfo of this.pool) {
-      if (!this.activeBrowsers.has(browserInfo.id)) {
-        // Check health/age
-        const age = Date.now() - browserInfo.createdAt;
-        const isExpired = age > this.maxAge;
-        const isHealthy = browserInfo.browser && browserInfo.browser.isConnected() && !browserInfo.markedForRemoval;
+  _findAndLockAvailableBrowser(requestId) {
+    const now = Date.now();
 
-        if (!isExpired && isHealthy) {
-          // ATOMIC LOCK: Marking as active immediately within the loop
-          this.activeBrowsers.set(browserInfo.id, requestId);
-          return browserInfo;
-        }
+    for (const browserInfo of this.pool) {
+      if (this.activeBrowsers.has(browserInfo.id)) continue;
+
+      const age = now - browserInfo.createdAt;
+      const isExpired = age > this.maxAge;
+      const isHealthy = browserInfo.browser && browserInfo.browser.isConnected() && !browserInfo.markedForRemoval;
+
+      if (!isExpired && isHealthy) {
+        this.activeBrowsers.set(browserInfo.id, { requestId, acquiredAt: now });
+        browserInfo.lastUsed = now;
+        browserInfo.useCount += 1;
+        this.stats.reused += 1;
+        return browserInfo;
       }
     }
+
     return null;
   }
 
-  /**
-   * Get a browser from pool or create new one
-   * Returns attached requestId to ensure safe release
-   */
   async acquire() {
-    // Generate unique request ID 
     const requestId = `req-${crypto.randomUUID()}`;
 
-    // Check circuit breaker first
-    if (this.checkCircuitBreaker()) {
-      throw new Error('Browser pool unavailable. System recovering from failures.');
+    const available = this._findAndLockAvailableBrowser(requestId);
+    if (available) {
+      return { ...available, requestId };
     }
 
-    // Attempt 1: Immediate acquisition
-    const availableBrowser = this.findAndLock(requestId);
-
-    if (availableBrowser) {
-      availableBrowser.lastUsed = Date.now();
-      availableBrowser.useCount++;
-      this.stats.reused++;
-      logger.info(`♻️ Reusing browser ${availableBrowser.id} for request ${requestId} (use count: ${availableBrowser.useCount})`);
-
-      return { ...availableBrowser, requestId };
+    if (this.pool.length < this.maxPoolSize) {
+      const browserInfo = await this._createBrowser();
+      this.pool.push(browserInfo);
+      this.activeBrowsers.set(browserInfo.id, { requestId, acquiredAt: Date.now() });
+      return { ...browserInfo, requestId };
     }
 
-    // Check pool size limit
-    if (this.pool.length >= this.maxPoolSize) {
-      logger.warn(`⚠️ Pool size limit reached (${this.maxPoolSize}), waiting for available browser...`);
+    if (this._isLaunchBlocked()) {
+      throw this._buildBlockedError('Browser pool unavailable');
+    }
 
-      // Wait up to 60 seconds for a browser to become available
-      for (let i = 0; i < 60; i++) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+    if (this.pendingQueue.length >= this.maxQueueSize) {
+      this.stats.queueRejected += 1;
+      throw new Error(`Browser pool queue full (${this.maxQueueSize})`);
+    }
 
-        // Re-check for available browser using atomic helper
-        const nowAvailable = this.findAndLock(requestId);
+    return new Promise((resolve, reject) => {
+      const queuedAt = Date.now();
+      const timeout = setTimeout(() => {
+        const idx = this.pendingQueue.findIndex((entry) => entry.requestId === requestId);
+        if (idx >= 0) {
+          this.pendingQueue.splice(idx, 1);
+        }
+        this.stats.queueTimedOut += 1;
+        reject(new Error(`Browser acquisition timed out after ${this.acquireTimeoutMs}ms`));
+      }, this.acquireTimeoutMs);
 
-        if (nowAvailable) {
-          nowAvailable.lastUsed = Date.now();
-          nowAvailable.useCount++;
-          this.stats.reused++;
-          logger.info(`♻️ Reusing browser ${nowAvailable.id} after wait (Req: ${requestId})`);
+      this.pendingQueue.push({ requestId, resolve, reject, queuedAt, timeout });
+      logger.warn(`Browser request queued (${this.pendingQueue.length}/${this.maxQueueSize})`);
+    });
+  }
 
-          return { ...nowAvailable, requestId };
+  async _drainQueue() {
+    if (this.pendingQueue.length === 0) return;
+
+    while (this.pendingQueue.length > 0) {
+      const next = this.pendingQueue[0];
+      let browserInfo = this._findAndLockAvailableBrowser(next.requestId);
+
+      if (!browserInfo && this.pool.length < this.maxPoolSize) {
+        try {
+          browserInfo = await this._createBrowser();
+          this.pool.push(browserInfo);
+          this.activeBrowsers.set(browserInfo.id, {
+            requestId: next.requestId,
+            acquiredAt: Date.now()
+          });
+        } catch (error) {
+          // Keep queued requests; self-heal/probe will retry.
+          break;
         }
       }
 
-      throw new Error('Browser pool exhausted. Please try again later.');
+      if (!browserInfo) {
+        break;
+      }
+
+      this.pendingQueue.shift();
+      clearTimeout(next.timeout);
+      next.resolve({ ...browserInfo, requestId: next.requestId });
     }
-
-    // Create new browser
-    // Create new browser
-    const browserInfo = await this.createBrowser();
-
-    // Fix Race Condition: Lock BEFORE adding to pool
-    // This ensures no other request can acquire it via findAndLock() 
-    this.activeBrowsers.set(browserInfo.id, requestId);
-    this.pool.push(browserInfo);
-
-    return {
-      ...browserInfo,
-      requestId
-    };
   }
 
-  /**
-   * Release browser back to pool
-   * Requires requestId to prevent double-release/wrong-release
-   */
   release(browserId, requestId) {
-    // STRICT SECURITY: requestId is MANDATORY
     if (!requestId) {
-      logger.error(`❌ Security Violation: Attempted to release browser ${browserId} without requestId. DENIED.`);
-      return; // Fail safe - do not release
-    }
-
-    const currentOwner = this.activeBrowsers.get(browserId);
-
-    if (!currentOwner) {
-      logger.warn(`⚠️ Attempted to release browser ${browserId} which is not active.`);
+      logger.error(`Release denied for ${browserId}: missing requestId`);
       return;
     }
 
-    if (currentOwner !== requestId) {
-      logger.error(`❌ Security/Race: Request ${requestId} tried to release browser ${browserId} owned by ${currentOwner}. DENIED.`);
+    const lockInfo = this.activeBrowsers.get(browserId);
+    if (!lockInfo) {
+      logger.warn(`Release ignored for ${browserId}: browser not active`);
       return;
     }
 
-    const browserInfo = this.pool.find(b => b.id === browserId);
+    if (lockInfo.requestId !== requestId) {
+      logger.error(`Release denied for ${browserId}: ownership mismatch (${requestId} != ${lockInfo.requestId})`);
+      return;
+    }
 
-    // Cleanup active status
     this.activeBrowsers.delete(browserId);
 
+    const browserInfo = this.pool.find((entry) => entry.id === browserId);
     if (browserInfo) {
       browserInfo.lastUsed = Date.now();
-
-      // Post-release checks
       if (browserInfo.markedForRemoval || !browserInfo.browser || !browserInfo.browser.isConnected()) {
-        logger.info(`🧹 Browser ${browserId} was marked for removal or disconnected. Cleaning up now.`);
-        this.removeBrowser(browserId).catch(e => logger.error(`Failed to cleanup released browser: ${e.message}`));
-      } else {
-        logger.debug(`🔄 Released browser ${browserId} back to pool (Req: ${requestId})`);
+        this.removeBrowser(browserId).catch((error) => {
+          logger.error(`Failed to remove disconnected browser ${browserId}: ${error.message}`);
+        });
       }
     }
+
+    this._drainQueue().catch((error) => {
+      logger.error(`Queue drain error after release: ${error.message}`);
+    });
   }
 
-  /**
-   * Remove browser from pool
-   */
   async removeBrowser(browserId) {
-    const index = this.pool.findIndex(b => b.id === browserId);
-    if (index !== -1) {
-      const browserInfo = this.pool[index];
+    const idx = this.pool.findIndex((entry) => entry.id === browserId);
+    if (idx === -1) return;
 
-      // Remove from pool immediately to prevent re-acquisition
-      this.pool.splice(index, 1);
+    const browserInfo = this.pool[idx];
+    this.pool.splice(idx, 1);
+    this.activeBrowsers.delete(browserId);
 
-      // If active, just remove from map
+    try {
+      if (browserInfo.browser && browserInfo.browser.isConnected()) {
+        await browserInfo.browser.close();
+      }
+    } catch (error) {
+      logger.warn(`Failed to close browser ${browserId}: ${error.message}`);
+    }
+
+    this.stats.closed += 1;
+  }
+
+  async _cleanupStaleLeases() {
+    const now = Date.now();
+
+    for (const [browserId, lockInfo] of this.activeBrowsers.entries()) {
+      if (!lockInfo?.acquiredAt) continue;
+      const age = now - lockInfo.acquiredAt;
+      if (age <= this.staleLeaseMs) continue;
+
+      logger.warn(`Reclaiming stale browser lease ${browserId} (age ${Math.round(age / 1000)}s)`);
       this.activeBrowsers.delete(browserId);
 
-      try {
-        if (browserInfo.browser && browserInfo.browser.isConnected()) {
-          await browserInfo.browser.close();
-        }
-      } catch (error) {
-        logger.warn(`Failed to close browser ${browserId}: ${error.message}`);
+      const browserInfo = this.pool.find((entry) => entry.id === browserId);
+      if (browserInfo) {
+        browserInfo.markedForRemoval = true;
       }
-
-      this.stats.closed++;
-      logger.info(`🗑️ Removed browser ${browserId} from pool`);
     }
   }
 
-  /**
-   * Cleanup idle and expired browsers
-   */
   async cleanup() {
+    await this._cleanupStaleLeases();
+
     const now = Date.now();
     const toRemove = [];
 
     for (const browserInfo of this.pool) {
       const isIdle = !this.activeBrowsers.has(browserInfo.id);
-      const idleTime = now - browserInfo.lastUsed;
-      const age = now - browserInfo.createdAt;
-      const isExpired = age > this.maxAge;
-      const isIdleTooLong = isIdle && idleTime > this.idleTimeout;
+      if (!isIdle) continue;
 
-      // Check disconnection using puppeteer API + markedForRemoval flag
-      const isDisconnected = browserInfo.markedForRemoval || !browserInfo.browser || !browserInfo.browser.isConnected();
+      const idleTooLong = (now - browserInfo.lastUsed) > this.idleTimeout;
+      const isExpired = (now - browserInfo.createdAt) > this.maxAge;
+      const disconnected = browserInfo.markedForRemoval || !browserInfo.browser || !browserInfo.browser.isConnected();
 
-      if ((isDisconnected || isExpired || isIdleTooLong) && isIdle) {
+      if (idleTooLong || isExpired || disconnected) {
         toRemove.push(browserInfo.id);
       }
     }
 
     for (const browserId of toRemove) {
-      // Double-check: ensure browser didn't become active between check and removal
-      if (!this.activeBrowsers.has(browserId)) {
-        await this.removeBrowser(browserId);
-      } else {
-        logger.debug(`Skipping removal of browser ${browserId} - became active during cleanup`);
-      }
+      await this.removeBrowser(browserId);
     }
 
-    if (toRemove.length > 0) {
-      logger.info(`🧹 Cleaned up ${toRemove.length} browser(s) from pool`);
+    await this._drainQueue();
+  }
+
+  async resetPool(reason = 'manual reset') {
+    logger.warn(`Resetting browser pool: ${reason}`);
+    this.stats.healingResets += 1;
+
+    const closeOps = this.pool.map((browserInfo) => {
+      if (!browserInfo.browser || !browserInfo.browser.isConnected()) return Promise.resolve();
+      return browserInfo.browser.close().catch((error) => {
+        logger.warn(`Failed closing browser during reset ${browserInfo.id}: ${error.message}`);
+      });
+    });
+
+    await Promise.all(closeOps);
+
+    this.pool = [];
+    this.activeBrowsers.clear();
+
+    for (const pending of this.pendingQueue) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(`Browser pool reset: ${reason}`));
+    }
+    this.pendingQueue = [];
+
+    this.circuitBreaker.state = 'HALF_OPEN';
+    this.circuitBreaker.failures = 0;
+    this.circuitBreaker.openedAt = Date.now();
+    this.circuitBreaker.halfOpenInFlight = false;
+    this.circuitBreaker.consecutiveHalfOpenSuccesses = 0;
+  }
+
+  async runSelfHeal() {
+    // Keep pool tidy first.
+    await this.cleanup();
+
+    if (this.circuitBreaker.state !== 'OPEN') {
+      return;
+    }
+
+    const openedAt = this.circuitBreaker.openedAt || Date.now();
+    const elapsed = Date.now() - openedAt;
+    if (elapsed < this.circuitBreaker.resetTimeout) {
+      return;
+    }
+
+    if (this.circuitBreaker.halfOpenInFlight) {
+      return;
+    }
+
+    logger.info('Running HALF_OPEN self-heal probe');
+
+    try {
+      // Force HALF_OPEN so probe can run.
+      this.circuitBreaker.state = 'HALF_OPEN';
+      const probeBrowser = await this._createBrowser({ isProbe: true });
+      this.pool.push(probeBrowser);
+      logger.info('HALF_OPEN probe succeeded; pool recovered');
+      await this._drainQueue();
+    } catch (error) {
+      this._transitionToOpen(`Self-heal probe failed: ${error.message}`);
     }
   }
 
-  /**
-   * Get pool statistics
-   */
   getStats() {
+    const totalMem = os.totalmem();
+    const usedMem = totalMem - os.freemem();
+
     return {
       ...this.stats,
       poolSize: this.pool.length,
       activeBrowsers: this.activeBrowsers.size,
-      idleBrowsers: this.pool.length - this.activeBrowsers.size,
+      idleBrowsers: Math.max(0, this.pool.length - this.activeBrowsers.size),
+      queue: {
+        size: this.pendingQueue.length,
+        maxSize: this.maxQueueSize,
+        acquireTimeoutMs: this.acquireTimeoutMs
+      },
       circuitBreaker: {
         state: this.circuitBreaker.state,
-        failures: this.circuitBreaker.failures
+        failures: this.circuitBreaker.failures,
+        threshold: this.circuitBreaker.threshold,
+        resetTimeoutMs: this.circuitBreaker.resetTimeout,
+        openedAt: this.circuitBreaker.openedAt ? new Date(this.circuitBreaker.openedAt).toISOString() : null,
+        halfOpenInFlight: this.circuitBreaker.halfOpenInFlight,
+        consecutiveHalfOpenSuccesses: this.circuitBreaker.consecutiveHalfOpenSuccesses
       },
       memory: {
-        total: os.totalmem(),
+        total: totalMem,
         free: os.freemem(),
-        used: os.totalmem() - os.freemem(),
-        percent: ((os.totalmem() - os.freemem()) / os.totalmem() * 100).toFixed(1)
+        used: usedMem,
+        percent: ((usedMem / totalMem) * 100).toFixed(1)
       }
     };
   }
 
-  /**
-   * Close all browsers and cleanup
-   */
   async shutdown() {
-    logger.info('🛑 Shutting down browser pool...');
+    logger.info('Shutting down browser pool');
 
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    if (this.memoryCheckInterval) clearInterval(this.memoryCheckInterval);
+    if (this.healInterval) clearInterval(this.healInterval);
+
+    for (const pending of this.pendingQueue) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Browser pool shutting down'));
     }
+    this.pendingQueue = [];
 
-    if (this.memoryCheckInterval) {
-      clearInterval(this.memoryCheckInterval);
-    }
+    const closeOps = this.pool.map((browserInfo) => {
+      if (!browserInfo.browser || !browserInfo.browser.isConnected()) return Promise.resolve();
+      return browserInfo.browser.close().catch((error) => {
+        logger.warn(`Failed closing browser ${browserInfo.id}: ${error.message}`);
+      });
+    });
 
-    const activeCount = this.activeBrowsers.size;
-    if (activeCount > 0) {
-      logger.warn(`⚠️ Shutting down with ${activeCount} active browser(s). Active requests may fail.`);
-      // Log active request IDs for debugging
-      const activeIds = Array.from(this.activeBrowsers.values()).join(', ');
-      logger.warn(`Active requests affected: ${activeIds}`);
-    }
-
-    // Close all browsers
-    const closePromises = this.pool.map(browserInfo => {
-      if (browserInfo.browser && browserInfo.browser.isConnected()) {
-        return browserInfo.browser.close().catch(err => {
-          logger.warn(`Failed to close browser ${browserInfo.id}: ${err.message}`);
-        });
-      }
-      return null;
-    }).filter(p => p !== null);
-
-    await Promise.all(closePromises);
+    await Promise.all(closeOps);
     this.pool = [];
     this.activeBrowsers.clear();
 
-    logger.info('✅ Browser pool shut down');
+    logger.info('Browser pool shut down complete');
   }
 }
 
-// Singleton instance
 const browserPool = new BrowserPool({
-  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '1'), // Reduced to 1 for Railway stability
-  idleTimeout: parseInt(process.env.BROWSER_IDLE_TIMEOUT || '300000'), // 5 minutes
-  maxAge: parseInt(process.env.BROWSER_MAX_AGE || '1800000') // 30 minutes
+  maxPoolSize: parseInt(process.env.BROWSER_POOL_SIZE || '1', 10),
+  idleTimeout: parseInt(process.env.BROWSER_IDLE_TIMEOUT || '300000', 10),
+  maxAge: parseInt(process.env.BROWSER_MAX_AGE || '1800000', 10),
+  maxQueueSize: parseInt(process.env.BROWSER_QUEUE_MAX || '20', 10),
+  acquireTimeoutMs: parseInt(process.env.BROWSER_ACQUIRE_TIMEOUT_MS || '45000', 10),
+  staleLeaseMs: parseInt(process.env.BROWSER_STALE_LEASE_MS || '300000', 10),
+  failureThreshold: parseInt(process.env.BROWSER_BREAKER_THRESHOLD || '3', 10),
+  resetTimeout: parseInt(process.env.BROWSER_BREAKER_RESET_TIMEOUT_MS || '60000', 10),
+  halfOpenSuccessThreshold: parseInt(process.env.BROWSER_BREAKER_HALF_OPEN_SUCCESS || '1', 10)
 });
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   await browserPool.shutdown();
 });

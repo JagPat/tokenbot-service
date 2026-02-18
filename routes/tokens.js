@@ -12,25 +12,25 @@ router.post('/refresh', async (req, res, next) => {
   try {
     // Support both user authentication and service-to-service calls
     let user_id = null;
-    
+
     // Check if authenticated user (user endpoint)
     if (req.user && req.user.user_id) {
       user_id = req.user.user_id;
       logger.info(`🔄 User token refresh requested for user: ${user_id}`);
-    } 
+    }
     // Check if service-to-service call (backend endpoint)
     else if (req.body.user_id || req.query.user_id) {
       // Verify service API key for service-to-service calls
       const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
-      
+
       if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
         return res.status(401).json({
           success: false,
           error: 'Unauthorized service call'
         });
       }
-      
+
       user_id = req.body.user_id || req.query.user_id;
       logger.info(`🔄 Service token refresh requested for user: ${user_id}`);
     } else {
@@ -39,11 +39,15 @@ router.post('/refresh', async (req, res, next) => {
         error: 'Missing user_id'
       });
     }
-    
-    const tokenData = await tokenManager.refreshTokenForUser(user_id);
-    
-    res.json({ 
-      success: true, 
+
+    const brokerType = String(req.body.brokerType || req.query.brokerType || 'ZERODHA').toUpperCase();
+    const accountId = req.body.accountId || req.query.accountId;
+    const connectionId = req.body.connectionId || req.query.connectionId;
+
+    const tokenData = await tokenManager.refreshTokenForUser(user_id, brokerType, accountId, connectionId);
+
+    res.json({
+      success: true,
       message: 'Token refreshed successfully',
       data: {
         access_token: tokenData.access_token,
@@ -52,14 +56,15 @@ router.post('/refresh', async (req, res, next) => {
         execution_time_ms: tokenData.execution_time_ms
       }
     });
-    
+
   } catch (error) {
     logger.error('Error refreshing token:', error);
-    
+
     // Provide user-friendly error messages
     let errorMessage = error.message;
     let statusCode = 500;
-    
+    let retryAfterMs = error.retryAfterMs || null;
+
     if (error.message.includes('No active credentials')) {
       errorMessage = 'Please configure your broker credentials first';
       statusCode = 404;
@@ -70,11 +75,24 @@ router.post('/refresh', async (req, res, next) => {
       errorMessage = 'Authentication failed. Please check your credentials';
     } else if (error.message.includes('TOTP')) {
       errorMessage = 'TOTP verification failed. Please check your TOTP secret';
+    } else if (
+      error.code === 'BROWSER_POOL_UNAVAILABLE' ||
+      error.code === 'BROWSER_POOL_EXHAUSTED' ||
+      error.message.includes('Browser unavailable') ||
+      error.message.includes('circuit breaker')
+    ) {
+      errorMessage = 'Token refresh temporarily unavailable: browser pool is recovering';
+      statusCode = 503;
+      retryAfterMs = retryAfterMs || 30000;
+      if (retryAfterMs) {
+        res.setHeader('Retry-After', Math.max(1, Math.ceil(retryAfterMs / 1000)));
+      }
     }
-    
-    res.status(statusCode).json({ 
-      success: false, 
+
+    res.status(statusCode).json({
+      success: false,
       error: errorMessage,
+      retry_after_ms: retryAfterMs,
       hint: error.message.includes('incomplete') ? 'Use POST /api/credentials with all required fields (kite_user_id, password, totp_secret, api_key, api_secret) to complete credential setup.' : undefined
     });
   }
@@ -87,16 +105,16 @@ router.post('/refresh', async (req, res, next) => {
 router.get('/status', authenticateUser, async (req, res, next) => {
   try {
     const { user_id } = req.user;
-    
+
     const token = await tokenManager.getValidToken(user_id);
-    
+
     if (!token) {
-      return res.json({ 
-        success: true, 
-        data: { 
+      return res.json({
+        success: true,
+        data: {
           has_token: false,
           message: 'No valid token found. Please refresh token.'
-        } 
+        }
       });
     }
 
@@ -104,9 +122,9 @@ router.get('/status', authenticateUser, async (req, res, next) => {
     const now = new Date();
     const expiresAt = new Date(token.expires_at);
     const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       data: {
         has_token: true,
         expires_at: token.expires_at,
@@ -116,7 +134,7 @@ router.get('/status', authenticateUser, async (req, res, next) => {
         expires_soon: hoursUntilExpiry < 2
       }
     });
-    
+
   } catch (error) {
     logger.error('Error fetching token status:', error);
     next(error);
@@ -129,31 +147,31 @@ router.get('/status', authenticateUser, async (req, res, next) => {
  */
 router.get('/current', authenticateService, async (req, res, next) => {
   try {
-    const { user_id } = req.query;
-    
+    const { user_id, brokerType, accountId, connectionId } = req.query;
+
     if (!user_id) {
       return res.status(400).json({
         success: false,
         error: 'Missing required parameter: user_id'
       });
     }
-    
-    logger.info(`🔍 Getting current token for user: ${user_id}`);
-    
-    const tokenData = await tokenManager.getCurrentToken(user_id);
-    
+
+    logger.info(`🔍 Getting current token for user: ${user_id} (Broker: ${brokerType || 'Default'})`);
+
+    const tokenData = await tokenManager.getCurrentToken(user_id, String(brokerType || 'ZERODHA').toUpperCase(), accountId, connectionId);
+
     if (!tokenData) {
       return res.status(404).json({
         success: false,
         error: 'No token found for user'
       });
     }
-    
+
     res.json({
       success: true,
       data: tokenData
     });
-    
+
   } catch (error) {
     logger.error('Error getting current token:', error);
     res.status(500).json({
@@ -170,11 +188,11 @@ router.get('/current', authenticateService, async (req, res, next) => {
 router.get('/:userId', authenticateService, async (req, res, next) => {
   try {
     const { userId } = req.params;
-    
+
     logger.info(`🔍 Token requested for user: ${userId}`);
-    
+
     const token = await tokenManager.getCurrentToken(userId);
-    
+
     if (!token) {
       return res.status(404).json({
         success: false,
@@ -199,7 +217,7 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
         hours_until_expiry: Math.max(0, hoursUntilExpiry).toFixed(2)
       }
     });
-    
+
   } catch (error) {
     logger.error('Error fetching token:', error);
     next(error);
@@ -241,10 +259,10 @@ router.get('/logs/:userId', async (req, res, next) => {
  */
 router.post('/store', authenticateService, async (req, res, next) => {
   try {
-    const { user_id, access_token, refresh_token, expires_at, mode } = req.body;
-    
-    logger.info(`💾 Storing token data for user: ${user_id}`);
-    
+    const { user_id, access_token, refresh_token, expires_at, mode, brokerType, accountId } = req.body;
+
+    logger.info(`💾 Storing token data for user: ${user_id} (${brokerType || 'ZERODHA'})`);
+
     // Validate required fields
     if (!user_id || !access_token) {
       return res.status(400).json({
@@ -252,22 +270,24 @@ router.post('/store', authenticateService, async (req, res, next) => {
         error: 'Missing required fields: user_id and access_token'
       });
     }
-    
+
     // Store token data
     const result = await tokenManager.storeTokenData({
       user_id,
       access_token,
       refresh_token,
       expires_at,
-      mode: mode || 'manual'
+      mode: mode || 'manual',
+      brokerType,
+      accountId
     });
-    
+
     res.json({
       success: true,
       message: 'Token data stored successfully',
       data: result
     });
-    
+
   } catch (error) {
     logger.error('Error storing token data:', error);
     res.status(500).json({
@@ -278,4 +298,3 @@ router.post('/store', authenticateService, async (req, res, next) => {
 });
 
 module.exports = router;
-

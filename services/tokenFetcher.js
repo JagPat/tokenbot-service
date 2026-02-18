@@ -20,7 +20,11 @@ class TokenFetcher {
         logger.info(`✅ Browser acquired from pool: ${browserInfo.id}`);
       } catch (poolError) {
         logger.error(`❌ Failed to acquire browser from pool: ${poolError.message}`);
-        throw new Error(`Browser unavailable: ${poolError.message}`);
+        const wrappedError = new Error(`Browser unavailable: ${poolError.message}`);
+        wrappedError.code = poolError.code || 'BROWSER_POOL_UNAVAILABLE';
+        wrappedError.statusCode = poolError.statusCode || 503;
+        wrappedError.retryAfterMs = poolError.retryAfterMs || 30000;
+        throw wrappedError;
       }
 
       // Verify browser is connected
@@ -929,18 +933,9 @@ class TokenFetcher {
 
       // Cleanup: close page if it exists
       if (page) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'tokenFetcher.js:930', message: 'BEFORE page.close() in error handler', data: { pageExists: !!page }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'I' }) }).catch(() => { });
-        // #endregion
         try {
           await page.close();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'tokenFetcher.js:933', message: 'AFTER page.close() in error handler - SUCCESS', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'I' }) }).catch(() => { });
-          // #endregion
         } catch (closeError) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/972a6f96-8864-4e45-bf86-06098cc161d4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'tokenFetcher.js:934', message: 'page.close() FAILED in error handler', data: { error: closeError.message }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'I' }) }).catch(() => { });
-          // #endregion
           logger.warn(`Failed to close page: ${closeError.message}`);
         }
       }
@@ -980,4 +975,3 @@ class TokenFetcher {
 }
 
 module.exports = new TokenFetcher();
-

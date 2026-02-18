@@ -22,6 +22,12 @@ router.get('/', async (req, res) => {
   let dbConnected = false;
   let dbLatency = null;
   let dbError = null;
+  let tokenRefreshHealth = {
+    last_success_at: null,
+    last_failure_at: null,
+    recent_successes: 0,
+    recent_failures: 0
+  };
 
   try {
     if (process.env.DATABASE_URL) {
@@ -72,15 +78,43 @@ router.get('/', async (req, res) => {
         logger.error(`❌ CRITICAL: Missing required tables: ${missingTables.join(', ')}`);
         logger.error(`   Database: ${dbInfo.database} on ${dbInfo.host || 'unknown'}:${dbInfo.port || 'unknown'}`);
       }
+
+      // Token refresh health metrics (best effort)
+      try {
+        const tokenHealthResult = await db.query(`
+          SELECT
+            MAX(CASE WHEN status = 'success' THEN created_at END) AS last_success_at,
+            MAX(CASE WHEN status = 'failed' THEN created_at END) AS last_failure_at,
+            SUM(CASE WHEN status = 'success' AND created_at > NOW() - INTERVAL '1 hour' THEN 1 ELSE 0 END) AS recent_successes,
+            SUM(CASE WHEN status = 'failed' AND created_at > NOW() - INTERVAL '1 hour' THEN 1 ELSE 0 END) AS recent_failures
+          FROM token_generation_logs
+        `);
+
+        if (tokenHealthResult?.rows?.[0]) {
+          tokenRefreshHealth = {
+            last_success_at: tokenHealthResult.rows[0].last_success_at,
+            last_failure_at: tokenHealthResult.rows[0].last_failure_at,
+            recent_successes: parseInt(tokenHealthResult.rows[0].recent_successes || '0', 10),
+            recent_failures: parseInt(tokenHealthResult.rows[0].recent_failures || '0', 10)
+          };
+        }
+      } catch (metricsError) {
+        logger.warn(`⚠️ Token refresh metrics unavailable: ${metricsError.message}`);
+      }
     } catch (tableError) {
       logger.error(`❌ Error checking tables: ${tableError.message}`);
     }
   }
 
+  const browserPoolStats = browserPool ? browserPool.getStats() : { error: 'not_available' };
+  const breakerState = browserPoolStats?.circuitBreaker?.state || 'UNKNOWN';
+  const breakerOpen = breakerState === 'OPEN';
+  const degraded = !(dbConnected && tablesExist) || breakerOpen;
+
   // Always return 200, even if database is not connected
   res.status(200).json({
     success: true,
-    status: (dbConnected && tablesExist) ? 'healthy' : 'degraded',
+    status: degraded ? 'degraded' : 'healthy',
     service: 'tokenbot-service',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
@@ -108,7 +142,8 @@ router.get('/', async (req, res) => {
       used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
       total_mb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
     },
-    browser_pool: browserPool ? browserPool.getStats() : { error: 'not_available' }
+    browser_pool: browserPoolStats,
+    token_refresh: tokenRefreshHealth
   });
 });
 
@@ -143,14 +178,28 @@ router.get('/detailed', async (req, res) => {
       WHERE created_at > NOW() - INTERVAL '7 days'
     `);
 
+    let tokenHealthResult = null;
+    try {
+      tokenHealthResult = await db.query(`
+        SELECT
+          MAX(CASE WHEN status = 'success' THEN created_at END) AS last_success_at,
+          MAX(CASE WHEN status = 'failed' THEN created_at END) AS last_failure_at
+        FROM token_generation_logs
+      `);
+    } catch (metricsError) {
+      logger.warn(`Detailed health token metrics unavailable: ${metricsError.message}`);
+    }
+
     res.json({
       success: true,
-      status: 'healthy',
+      status: browserPool?.getStats?.()?.circuitBreaker?.state === 'OPEN' ? 'degraded' : 'healthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       stats: {
         users: usersResult.rows[0],
         tokens: tokensResult.rows[0],
+        browser_pool: browserPool ? browserPool.getStats() : null,
+        token_health: tokenHealthResult?.rows?.[0] || null,
         recent_logs: {
           ...logsResult.rows[0],
           period: 'last_7_days'
@@ -315,7 +364,7 @@ router.post('/migrate', async (req, res) => {
   const validKeys = [
     process.env.JWT_SECRET,
     process.env.TOKENBOT_API_KEY,
-    '4b0b4a4f4ab5f3130ea01acbeaab365ddc26a08d70070e1f4d996a237861d1eb' // Fallback known key
+    process.env.SERVICE_API_KEY
   ].filter(Boolean);
   
   // Require API key for security
@@ -371,7 +420,7 @@ router.post('/optimize', async (req, res) => {
   const validKeys = [
     process.env.JWT_SECRET,
     process.env.TOKENBOT_API_KEY,
-    '4b0b4a4f4ab5f3130ea01acbeaab365ddc26a08d70070e1f4d996a237861d1eb'
+    process.env.SERVICE_API_KEY
   ].filter(Boolean);
   
   if (!apiKey || !validKeys.includes(apiKey)) {
@@ -550,4 +599,3 @@ router.post('/optimize', async (req, res) => {
 });
 
 module.exports = router;
-

@@ -2,6 +2,25 @@ const db = require('../config/database');
 const encryptor = require('./encryptor');
 const logger = require('../utils/logger');
 
+function resolveTokenBotUserId() {
+    const candidate =
+        process.env.TOKENBOT_SERVICE_USER_ID ||
+        process.env.SERVICE_USER_ID ||
+        process.env.SYSTEM_USER_ID ||
+        process.env.JOB_USER_ID ||
+        (process.env.NODE_ENV !== 'production' ? process.env.USER_ID : null);
+
+    if (candidate && String(candidate).trim()) {
+        return String(candidate).trim();
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+        return 'local-dev-user';
+    }
+
+    return null;
+}
+
 class CredentialLoader {
     /**
      * Sync credentials from environment variables to database
@@ -21,11 +40,18 @@ class CredentialLoader {
                 return;
             }
 
+            const tokenBotUserId = resolveTokenBotUserId();
+            if (!tokenBotUserId) {
+                logger.warn('⚠️ Skipping Env Var sync: Missing TOKENBOT_SERVICE_USER_ID/SERVICE_USER_ID in production');
+                return;
+            }
+
             logger.info('🔄 Checking for existing credentials...');
 
-            // 2. Check if credentials already exist for 'default' user
+            // 2. Check if credentials already exist for the configured service user
             const existing = await db.query(
-                `SELECT kite_user_id FROM kite_user_credentials WHERE user_id = 'default'`
+                `SELECT kite_user_id FROM kite_user_credentials WHERE user_id = $1`,
+                [tokenBotUserId]
             );
 
             // 3. If missing or placeholder, Sync
@@ -56,7 +82,7 @@ class CredentialLoader {
             is_active = true,
             updated_at = NOW()
         `, [
-                    'default',
+                    tokenBotUserId,
                     userId,
                     encrypted.password,
                     encrypted.totp_secret,
@@ -64,7 +90,7 @@ class CredentialLoader {
                     encrypted.api_secret
                 ]);
 
-                logger.info('✅ Initialized default user credentials from environment variables');
+                logger.info(`✅ Initialized service-user credentials from environment variables (${tokenBotUserId})`);
             } else {
                 logger.info('ℹ️ Credentials already configured in DB, skipping Env Var sync');
             }

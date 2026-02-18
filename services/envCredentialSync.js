@@ -2,6 +2,25 @@ const db = require('../config/database');
 const encryptor = require('./encryptor');
 const logger = require('../utils/logger');
 
+function resolveTokenBotUserId() {
+    const candidate =
+        process.env.TOKENBOT_SERVICE_USER_ID ||
+        process.env.SERVICE_USER_ID ||
+        process.env.SYSTEM_USER_ID ||
+        process.env.JOB_USER_ID ||
+        (process.env.NODE_ENV !== 'production' ? process.env.USER_ID : null);
+
+    if (candidate && String(candidate).trim()) {
+        return String(candidate).trim();
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+        return 'local-dev-user';
+    }
+
+    return null;
+}
+
 class EnvironmentCredentialSync {
     /**
      * Syncs credentials from environment variables to the database if they exist.
@@ -31,7 +50,11 @@ class EnvironmentCredentialSync {
                 api_secret: encryptor.encrypt(apiSecret)
             };
 
-            const botUserId = 'default';
+            const botUserId = resolveTokenBotUserId();
+            if (!botUserId) {
+                logger.warn('⚠️ [EnvSync] Missing service user id in production. Skipping credential auto-sync.');
+                return;
+            }
 
             // 3. CHECK if sync is needed (Prevent Crash Loops)
             // Fetch existing credentials
