@@ -44,6 +44,13 @@ function errorHandler(err, req, res, next) {
     });
   }
 
+  if (err.code === 'INVALID_DEFAULT_USER' || err.code === 'MISSING_USER_ID') {
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
+  }
+
   // Default error response
   const statusCode = err.statusCode || err.status || 500;
   const message = process.env.NODE_ENV === 'production' 
@@ -72,4 +79,3 @@ module.exports = {
   errorHandler,
   notFoundHandler
 };
-

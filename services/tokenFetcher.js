@@ -4,6 +4,43 @@ const logger = require('../utils/logger');
 const browserPool = require('./browserPool');
 
 class TokenFetcher {
+  _isTransientBrowserCrash(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return [
+      'target closed',
+      'protocol error (target.createtarget)',
+      'browser has disconnected',
+      'session closed',
+      'detached frame'
+    ].some((needle) => message.includes(needle));
+  }
+
+  async _openPageWithRecovery(browserInfo, browser) {
+    try {
+      const page = await browser.newPage();
+      return { browserInfo, browser, page };
+    } catch (error) {
+      if (!this._isTransientBrowserCrash(error)) {
+        throw error;
+      }
+
+      logger.warn(`⚠️ Browser ${browserInfo?.id || 'unknown'} crashed while opening page, retrying once with fresh browser`);
+
+      if (browserInfo?.id) {
+        try {
+          browserInfo.markedForRemoval = true;
+          await browserPool.removeBrowser(browserInfo.id);
+        } catch (removeError) {
+          logger.warn(`Failed to evict crashed browser ${browserInfo.id}: ${removeError.message}`);
+        }
+      }
+
+      const replacement = await browserPool.acquire();
+      const replacementPage = await replacement.browser.newPage();
+      return { browserInfo: replacement, browser: replacement.browser, page: replacementPage };
+    }
+  }
+
   async fetchAccessToken({ kite_user_id, password, totp_secret, api_key, api_secret }) {
     const startTime = Date.now();
     let browserInfo = null;
@@ -32,7 +69,10 @@ class TokenFetcher {
         throw new Error('Browser is not connected');
       }
 
-      page = await browser.newPage();
+      const pageContext = await this._openPageWithRecovery(browserInfo, browser);
+      browserInfo = pageContext.browserInfo;
+      browser = pageContext.browser;
+      page = pageContext.page;
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
       // CRITICAL: Set up response and request interceptors EARLY to capture callback URL
@@ -949,6 +989,14 @@ class TokenFetcher {
         } catch (releaseError) {
           logger.warn(`Failed to release browser: ${releaseError.message}`);
         }
+      }
+
+      if (this._isTransientBrowserCrash(error)) {
+        const wrappedError = new Error(`Browser transient failure: ${error.message}`);
+        wrappedError.code = error.code || 'BROWSER_POOL_UNAVAILABLE';
+        wrappedError.statusCode = error.statusCode || 503;
+        wrappedError.retryAfterMs = error.retryAfterMs || 30000;
+        throw wrappedError;
       }
 
       throw error;

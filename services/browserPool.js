@@ -76,23 +76,30 @@ class BrowserPool {
   }
 
   getBrowserArgs() {
-    return [
+    const args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-first-run',
       '--no-zygote',
-      '--single-process',
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
       '--disable-sync',
       '--mute-audio',
-      '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+      '--disable-features=TranslateUI,IsolateOrigins,site-per-process,MediaRouter',
       '--js-flags=--max-old-space-size=512'
     ];
+
+    // Single-process is unstable in many container runtimes and can cause
+    // immediate Target.createTarget failures. Keep it opt-in only.
+    if (String(process.env.PUPPETEER_SINGLE_PROCESS || '').toLowerCase() === 'true') {
+      args.push('--single-process');
+    }
+
+    return args;
   }
 
   checkMemoryPressure() {
@@ -227,6 +234,7 @@ class BrowserPool {
       const browser = await puppeteer.launch({
         headless: 'new',
         executablePath,
+        pipe: true,
         protocolTimeout: 240000,
         timeout: 180000,
         args: this.getBrowserArgs(),

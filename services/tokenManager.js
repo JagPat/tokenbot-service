@@ -4,6 +4,7 @@ const encryptor = require('./encryptor');
 const logger = require('../utils/logger');
 const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
+const { assertProductionSafeUserId } = require('../utils/userIdPolicy');
 
 class TokenManager {
   constructor() {
@@ -11,10 +12,11 @@ class TokenManager {
   }
 
   async refreshTokenForUser(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
+    const safeUserId = assertProductionSafeUserId(userId, 'refresh');
     const normalizedBrokerType = String(brokerType || 'ZERODHA').toUpperCase();
     const refreshKey = [
       normalizedBrokerType,
-      userId,
+      safeUserId,
       accountId || 'primary',
       connectionId || 'default'
     ].join(':');
@@ -26,7 +28,7 @@ class TokenManager {
     }
 
     const refreshPromise = this._refreshTokenForUserInternal({
-      userId,
+      userId: safeUserId,
       brokerType: normalizedBrokerType,
       accountId,
       connectionId
@@ -405,14 +407,15 @@ class TokenManager {
    * @returns {Object|null} Current token data or null if not found
    */
   async getCurrentToken(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
-    const brokerToken = await this._getBrokerConnectionToken(userId, brokerType, accountId, connectionId);
+    const safeUserId = assertProductionSafeUserId(userId, 'lookup');
+    const brokerToken = await this._getBrokerConnectionToken(safeUserId, brokerType, accountId, connectionId);
 
     if (brokerToken?.access_token) {
       return brokerToken;
     }
 
     if (brokerType === 'ZERODHA') {
-      return this._getLegacyZerodhaToken(userId);
+      return this._getLegacyZerodhaToken(safeUserId);
     }
 
     return null;

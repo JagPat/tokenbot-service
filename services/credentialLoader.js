@@ -11,7 +11,12 @@ function resolveTokenBotUserId() {
         (process.env.NODE_ENV !== 'production' ? process.env.USER_ID : null);
 
     if (candidate && String(candidate).trim()) {
-        return String(candidate).trim();
+        const normalized = String(candidate).trim();
+        if (process.env.NODE_ENV === 'production' && normalized.toLowerCase() === 'default') {
+            logger.warn('⚠️ TOKENBOT service user "default" is not allowed in production');
+            return null;
+        }
+        return normalized;
     }
 
     if (process.env.NODE_ENV !== 'production') {

@@ -2,10 +2,24 @@ const cron = require('node-cron');
 const db = require('../config/database');
 const tokenManager = require('./tokenManager');
 const logger = require('../utils/logger');
+const { isDefaultUserId } = require('../utils/userIdPolicy');
 
 class Scheduler {
   constructor() {
     this.isRunning = false;
+  }
+
+  _filterSchedulableUsers(rows = []) {
+    if (process.env.NODE_ENV !== 'production') {
+      return rows;
+    }
+
+    const filtered = rows.filter((row) => !isDefaultUserId(row.user_id));
+    const skipped = rows.length - filtered.length;
+    if (skipped > 0) {
+      logger.warn(`⚠️ [Scheduler] Skipping ${skipped} default-user records in production`);
+    }
+    return filtered;
   }
 
   start() {
@@ -51,15 +65,17 @@ class Scheduler {
         WHERE is_active = true AND auto_refresh_enabled = true
       `);
 
-      if (usersResult.rows.length === 0) {
+      const schedulableUsers = this._filterSchedulableUsers(usersResult.rows);
+
+      if (schedulableUsers.length === 0) {
         logger.info('ℹ️ [Scheduler] No active users found for startup check');
         return;
       }
 
-      logger.info(`🔍 [Scheduler] Checking tokens for ${usersResult.rows.length} active users...`);
+      logger.info(`🔍 [Scheduler] Checking tokens for ${schedulableUsers.length} active users...`);
 
       let needsRefreshCount = 0;
-      for (const user of usersResult.rows) {
+      for (const user of schedulableUsers) {
         const needsRefresh = await this._checkIfTokenNeeded(user.user_id);
         if (needsRefresh) {
           needsRefreshCount++;
@@ -123,14 +139,15 @@ class Scheduler {
         ORDER BY st.expires_at ASC
       `);
 
-      if (result.rows.length === 0) {
+      const expiringUsers = this._filterSchedulableUsers(result.rows);
+      if (expiringUsers.length === 0) {
         logger.info('✅ [Scheduler] No tokens expiring soon (next 3 hours)');
         return;
       }
 
-      logger.info(`🔄 [Scheduler] Found ${result.rows.length} tokens expiring soon, refreshing...`);
+      logger.info(`🔄 [Scheduler] Found ${expiringUsers.length} tokens expiring soon, refreshing...`);
 
-      for (const row of result.rows) {
+      for (const row of expiringUsers) {
         const expiresAt = new Date(row.expires_at);
         const now = new Date();
         const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
@@ -202,7 +219,7 @@ class Scheduler {
         WHERE is_active = true AND auto_refresh_enabled = true
       `);
 
-      const users = result.rows;
+      const users = this._filterSchedulableUsers(result.rows);
       logger.info(`📋 [Scheduler] Found ${users.length} users for token refresh`);
 
       if (users.length === 0) {
@@ -277,4 +294,3 @@ class Scheduler {
 }
 
 module.exports = new Scheduler();
-

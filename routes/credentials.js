@@ -4,6 +4,7 @@ const db = require('../config/database');
 const encryptor = require('../services/encryptor');
 const { authenticateUser } = require('../middleware/auth');
 const logger = require('../utils/logger');
+const { assertProductionSafeUserId } = require('../utils/userIdPolicy');
 
 function resolveServiceUserId() {
   const candidate =
@@ -14,7 +15,11 @@ function resolveServiceUserId() {
     (process.env.NODE_ENV !== 'production' ? process.env.USER_ID : null);
 
   if (candidate && String(candidate).trim()) {
-    return String(candidate).trim();
+    const normalized = String(candidate).trim();
+    if (process.env.NODE_ENV === 'production' && normalized.toLowerCase() === 'default') {
+      return null;
+    }
+    return normalized;
   }
 
   if (process.env.NODE_ENV !== 'production') {
@@ -44,7 +49,14 @@ router.post('/', async (req, res, next) => {
       const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
       
-      if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+      if (!expectedApiKey) {
+        return res.status(500).json({
+          success: false,
+          error: 'Service auth is not configured on TokenBot'
+        });
+      }
+
+      if (!serviceApiKey || serviceApiKey !== expectedApiKey) {
         return res.status(401).json({
           success: false,
           error: 'Unauthorized service call'
@@ -60,9 +72,10 @@ router.post('/', async (req, res, next) => {
       });
     }
     
+    const safeUserId = assertProductionSafeUserId(user_id, 'credentials');
     const { kite_user_id, password, totp_secret, api_key, api_secret, auto_refresh_enabled } = req.body;
     
-    logger.info(`📝 Saving credentials for user: ${user_id}`);
+    logger.info(`📝 Saving credentials for user: ${safeUserId}`);
     
     // Validate required fields
     if (!kite_user_id || !password || !totp_secret || !api_key || !api_secret) {
@@ -107,11 +120,11 @@ router.post('/', async (req, res, next) => {
         updated_at = NOW()
       RETURNING id, user_id, kite_user_id, is_active, auto_refresh_enabled
     `, [
-      user_id, kite_user_id, encrypted.password, encrypted.totp_secret,
+      safeUserId, kite_user_id, encrypted.password, encrypted.totp_secret,
       encrypted.api_key, encrypted.api_secret, auto_refresh_enabled !== false
     ]);
 
-    logger.info(`✅ Credentials saved for user: ${user_id}`);
+    logger.info(`✅ Credentials saved for user: ${safeUserId}`);
     
     res.json({ 
       success: true, 
@@ -284,7 +297,14 @@ router.patch('/api-key', async (req, res, next) => {
     const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
     const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
     
-    if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+    if (!expectedApiKey) {
+      return res.status(500).json({
+        success: false,
+        error: 'Service auth is not configured on TokenBot'
+      });
+    }
+
+    if (!serviceApiKey || serviceApiKey !== expectedApiKey) {
       return res.status(401).json({
         success: false,
         error: 'Unauthorized service call'
@@ -292,15 +312,8 @@ router.patch('/api-key', async (req, res, next) => {
     }
 
     const requestedUserId = req.body.user_id || req.query.user_id || resolveServiceUserId();
-    const user_id = requestedUserId ? String(requestedUserId).trim() : null;
+    const user_id = assertProductionSafeUserId(requestedUserId, 'credentials');
     const { api_key, api_secret } = req.body;
-
-    if (!user_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'user_id is required (or configure TOKENBOT_SERVICE_USER_ID in production)'
-      });
-    }
     
     if (!api_key) {
       return res.status(400).json({

@@ -3,6 +3,7 @@ const router = express.Router();
 const tokenManager = require('../services/tokenManager');
 const { authenticateUser, authenticateService } = require('../middleware/auth');
 const logger = require('../utils/logger');
+const { assertProductionSafeUserId, normalizeUserId } = require('../utils/userIdPolicy');
 
 function isTransientBrowserFailure(error) {
   const message = String(error?.message || '').toLowerCase();
@@ -51,7 +52,14 @@ router.post('/refresh', async (req, res, next) => {
       const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
 
-      if (!serviceApiKey || (expectedApiKey && serviceApiKey !== expectedApiKey)) {
+      if (!expectedApiKey) {
+        return res.status(500).json({
+          success: false,
+          error: 'Service auth is not configured on TokenBot'
+        });
+      }
+
+      if (!serviceApiKey || serviceApiKey !== expectedApiKey) {
         return res.status(401).json({
           success: false,
           error: 'Unauthorized service call'
@@ -66,6 +74,8 @@ router.post('/refresh', async (req, res, next) => {
         error: 'Missing user_id'
       });
     }
+
+    user_id = assertProductionSafeUserId(user_id, 'refresh');
 
     const brokerType = String(req.body.brokerType || req.query.brokerType || 'ZERODHA').toUpperCase();
     const accountId = req.body.accountId || req.query.accountId;
@@ -89,7 +99,7 @@ router.post('/refresh', async (req, res, next) => {
 
     // Provide user-friendly error messages
     let errorMessage = error.message;
-    let statusCode = 500;
+    let statusCode = error.statusCode || 500;
     let retryAfterMs = error.retryAfterMs || null;
 
     if (error.message.includes('No active credentials')) {
@@ -169,7 +179,8 @@ router.get('/status', authenticateUser, async (req, res, next) => {
  */
 router.get('/current', authenticateService, async (req, res, next) => {
   try {
-    const { user_id, brokerType, accountId, connectionId } = req.query;
+    const { brokerType, accountId, connectionId } = req.query;
+    const user_id = normalizeUserId(req.query.user_id);
 
     if (!user_id) {
       return res.status(400).json({
@@ -178,9 +189,11 @@ router.get('/current', authenticateService, async (req, res, next) => {
       });
     }
 
-    logger.info(`🔍 Getting current token for user: ${user_id} (Broker: ${brokerType || 'Default'})`);
+    const safeUserId = assertProductionSafeUserId(user_id, 'lookup');
 
-    const tokenData = await tokenManager.getCurrentToken(user_id, String(brokerType || 'ZERODHA').toUpperCase(), accountId, connectionId);
+    logger.info(`🔍 Getting current token for user: ${safeUserId} (Broker: ${brokerType || 'Default'})`);
+
+    const tokenData = await tokenManager.getCurrentToken(safeUserId, String(brokerType || 'ZERODHA').toUpperCase(), accountId, connectionId);
 
     if (!tokenData) {
       return res.status(404).json({
@@ -196,10 +209,40 @@ router.get('/current', authenticateService, async (req, res, next) => {
 
   } catch (error) {
     logger.error('Error getting current token:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       error: error.message
     });
+  }
+});
+
+/**
+ * GET /api/tokens/logs/:userId (User or Service)
+ * Get token generation logs
+ */
+router.get('/logs/:userId', async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    const safeUserId = assertProductionSafeUserId(userId, 'logs');
+    const { limit = 10 } = req.query;
+
+    // Check authentication - either user accessing their own logs or service
+    if (req.user && req.user.user_id !== safeUserId) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden'
+      });
+    }
+
+    const logs = await tokenManager.getTokenLogs(safeUserId, parseInt(limit));
+
+    res.json({
+      success: true,
+      data: logs
+    });
+  } catch (error) {
+    logger.error('Error fetching token logs:', error);
+    next(error);
   }
 });
 
@@ -210,10 +253,11 @@ router.get('/current', authenticateService, async (req, res, next) => {
 router.get('/:userId', authenticateService, async (req, res, next) => {
   try {
     const { userId } = req.params;
+    const safeUserId = assertProductionSafeUserId(userId, 'lookup');
 
-    logger.info(`🔍 Token requested for user: ${userId}`);
+    logger.info(`🔍 Token requested for user: ${safeUserId}`);
 
-    const token = await tokenManager.getCurrentToken(userId);
+    const token = await tokenManager.getCurrentToken(safeUserId);
 
     if (!token) {
       return res.status(404).json({
@@ -228,7 +272,7 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
     const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
 
     if (hoursUntilExpiry < 1) {
-      logger.warn(`⚠️ Token for user ${userId} expires in less than 1 hour`);
+      logger.warn(`⚠️ Token for user ${safeUserId} expires in less than 1 hour`);
     }
 
     res.json({
@@ -247,41 +291,13 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
 });
 
 /**
- * GET /api/tokens/logs/:userId (User or Service)
- * Get token generation logs
- */
-router.get('/logs/:userId', async (req, res, next) => {
-  try {
-    const { userId } = req.params;
-    const { limit = 10 } = req.query;
-
-    // Check authentication - either user accessing their own logs or service
-    if (req.user && req.user.user_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        error: 'Forbidden'
-      });
-    }
-
-    const logs = await tokenManager.getTokenLogs(userId, parseInt(limit));
-
-    res.json({
-      success: true,
-      data: logs
-    });
-  } catch (error) {
-    logger.error('Error fetching token logs:', error);
-    next(error);
-  }
-});
-
-/**
  * POST /api/tokens/store
  * Store token data for a user
  */
 router.post('/store', authenticateService, async (req, res, next) => {
   try {
-    const { user_id, access_token, refresh_token, expires_at, mode, brokerType, accountId } = req.body;
+    const { access_token, refresh_token, expires_at, mode, brokerType, accountId } = req.body;
+    const user_id = assertProductionSafeUserId(req.body.user_id, 'store');
 
     logger.info(`💾 Storing token data for user: ${user_id} (${brokerType || 'ZERODHA'})`);
 
@@ -312,7 +328,7 @@ router.post('/store', authenticateService, async (req, res, next) => {
 
   } catch (error) {
     logger.error('Error storing token data:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       error: error.message
     });
