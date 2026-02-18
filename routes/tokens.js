@@ -24,6 +24,7 @@ function isTransientBrowserFailure(error) {
     'browser pool unavailable',
     'circuit breaker',
     'target closed',
+    'detached frame',
     'protocol error (target.createtarget)',
     'navigation failed',
     'session closed'
