@@ -4,6 +4,32 @@ const tokenManager = require('../services/tokenManager');
 const { authenticateUser, authenticateService } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
+function isTransientBrowserFailure(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toUpperCase();
+  const statusCode = Number(error?.statusCode || 0);
+
+  if (statusCode === 503) return true;
+
+  if ([
+    'BROWSER_POOL_UNAVAILABLE',
+    'BROWSER_POOL_EXHAUSTED',
+    'BROWSER_POOL_TIMEOUT'
+  ].includes(code)) {
+    return true;
+  }
+
+  return [
+    'browser unavailable',
+    'browser pool unavailable',
+    'circuit breaker',
+    'target closed',
+    'protocol error (target.createtarget)',
+    'navigation failed',
+    'session closed'
+  ].some((needle) => message.includes(needle));
+}
+
 /**
  * POST /api/tokens/refresh
  * Token refresh (supports both user and service authentication)
@@ -75,15 +101,10 @@ router.post('/refresh', async (req, res, next) => {
       errorMessage = 'Authentication failed. Please check your credentials';
     } else if (error.message.includes('TOTP')) {
       errorMessage = 'TOTP verification failed. Please check your TOTP secret';
-    } else if (
-      error.code === 'BROWSER_POOL_UNAVAILABLE' ||
-      error.code === 'BROWSER_POOL_EXHAUSTED' ||
-      error.message.includes('Browser unavailable') ||
-      error.message.includes('circuit breaker')
-    ) {
+    } else if (isTransientBrowserFailure(error)) {
       errorMessage = 'Token refresh temporarily unavailable: browser pool is recovering';
       statusCode = 503;
-      retryAfterMs = retryAfterMs || 30000;
+      retryAfterMs = retryAfterMs || error.retryAfterMs || 30000;
       if (retryAfterMs) {
         res.setHeader('Retry-After', Math.max(1, Math.ceil(retryAfterMs / 1000)));
       }
