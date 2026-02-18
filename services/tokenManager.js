@@ -6,7 +6,40 @@ const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
 
 class TokenManager {
+  constructor() {
+    this.inFlightRefreshes = new Map();
+  }
+
   async refreshTokenForUser(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
+    const normalizedBrokerType = String(brokerType || 'ZERODHA').toUpperCase();
+    const refreshKey = [
+      normalizedBrokerType,
+      userId,
+      accountId || 'primary',
+      connectionId || 'default'
+    ].join(':');
+
+    const inFlight = this.inFlightRefreshes.get(refreshKey);
+    if (inFlight) {
+      logger.warn(`Refresh already in progress for ${refreshKey}; joining existing request`);
+      return inFlight;
+    }
+
+    const refreshPromise = this._refreshTokenForUserInternal({
+      userId,
+      brokerType: normalizedBrokerType,
+      accountId,
+      connectionId
+    })
+      .finally(() => {
+        this.inFlightRefreshes.delete(refreshKey);
+      });
+
+    this.inFlightRefreshes.set(refreshKey, refreshPromise);
+    return refreshPromise;
+  }
+
+  async _refreshTokenForUserInternal({ userId, brokerType = 'ZERODHA', accountId = null, connectionId = null }) {
     if (brokerType === 'ZERODHA') {
       return this._refreshLegacyZerodhaToken({ userId, accountId, connectionId });
     }

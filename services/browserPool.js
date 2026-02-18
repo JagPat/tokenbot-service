@@ -192,7 +192,11 @@ class BrowserPool {
     const retryInSec = Math.ceil(retryInMs / 1000);
     const reason = this.stats.lastFailureReason || 'browser failures';
 
-    return new Error(`${prefix}: circuit breaker ${breaker.state} (retry in ${retryInSec}s, reason: ${reason})`);
+    const error = new Error(`${prefix}: circuit breaker ${breaker.state} (retry in ${retryInSec}s, reason: ${reason})`);
+    error.code = 'BROWSER_POOL_UNAVAILABLE';
+    error.statusCode = 503;
+    error.retryAfterMs = Math.max(1000, retryInMs);
+    return error;
   }
 
   async _createBrowser({ isProbe = false } = {}) {
@@ -312,7 +316,11 @@ class BrowserPool {
 
     if (this.pendingQueue.length >= this.maxQueueSize) {
       this.stats.queueRejected += 1;
-      throw new Error(`Browser pool queue full (${this.maxQueueSize})`);
+      const error = new Error(`Browser pool queue full (${this.maxQueueSize})`);
+      error.code = 'BROWSER_POOL_EXHAUSTED';
+      error.statusCode = 503;
+      error.retryAfterMs = Math.max(1000, this.acquireTimeoutMs);
+      throw error;
     }
 
     return new Promise((resolve, reject) => {
@@ -323,7 +331,11 @@ class BrowserPool {
           this.pendingQueue.splice(idx, 1);
         }
         this.stats.queueTimedOut += 1;
-        reject(new Error(`Browser acquisition timed out after ${this.acquireTimeoutMs}ms`));
+        const error = new Error(`Browser acquisition timed out after ${this.acquireTimeoutMs}ms`);
+        error.code = 'BROWSER_POOL_TIMEOUT';
+        error.statusCode = 503;
+        error.retryAfterMs = 5000;
+        reject(error);
       }, this.acquireTimeoutMs);
 
       this.pendingQueue.push({ requestId, resolve, reject, queuedAt, timeout });
