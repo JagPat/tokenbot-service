@@ -19,6 +19,31 @@ const tokensRoutes = require('./routes/tokens');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function shouldStartScheduler() {
+  if (!process.env.DATABASE_URL) return false;
+
+  if (process.env.TOKENBOT_SCHEDULER_OWNER !== undefined) {
+    return parseBoolean(process.env.TOKENBOT_SCHEDULER_OWNER, false);
+  }
+
+  const railwayReplicaId = process.env.RAILWAY_REPLICA_ID;
+  if (railwayReplicaId !== undefined) {
+    return String(railwayReplicaId) === '0';
+  }
+
+  return true;
+}
+
 // Middleware
 app.use(helmet());
 
@@ -156,7 +181,12 @@ async function initializeServices() {
   // 2. Start other services
   try {
     if (process.env.ENCRYPTION_KEY) encryptor.test();
-    if (process.env.DATABASE_URL) scheduler.start();
+    if (shouldStartScheduler()) {
+      scheduler.start();
+      logger.info('✅ Scheduler started on this TokenBot instance');
+    } else {
+      logger.info('ℹ️ Scheduler skipped on this instance (non-owner replica)');
+    }
   } catch (err) {
     logger.warn('⚠️ Minor service initialization warning:', err.message);
   }

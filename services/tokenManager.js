@@ -5,10 +5,12 @@ const logger = require('../utils/logger');
 const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
 const { assertProductionSafeUserId } = require('../utils/userIdPolicy');
+const distributedLock = require('./distributedLock');
 
 class TokenManager {
   constructor() {
     this.inFlightRefreshes = new Map();
+    this.refreshLockTtlMs = Math.max(5000, parseInt(process.env.TOKEN_REFRESH_LOCK_TTL_MS || '45000', 10));
   }
 
   async refreshTokenForUser(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
@@ -27,12 +29,31 @@ class TokenManager {
       return inFlight;
     }
 
-    const refreshPromise = this._refreshTokenForUserInternal({
-      userId: safeUserId,
-      brokerType: normalizedBrokerType,
-      accountId,
-      connectionId
-    })
+    const refreshPromise = (async () => {
+      let lock = null;
+      try {
+        lock = await distributedLock.acquire(refreshKey, this.refreshLockTtlMs);
+      } catch (lockError) {
+        if (lockError?.statusCode === 503) {
+          throw lockError;
+        }
+        const normalizedError = new Error(`Unable to acquire refresh lock: ${lockError.message}`);
+        normalizedError.statusCode = 503;
+        normalizedError.retryAfterMs = 5000;
+        throw normalizedError;
+      }
+
+      try {
+        return await this._refreshTokenForUserInternal({
+          userId: safeUserId,
+          brokerType: normalizedBrokerType,
+          accountId,
+          connectionId
+        });
+      } finally {
+        await distributedLock.release(lock);
+      }
+    })()
       .finally(() => {
         this.inFlightRefreshes.delete(refreshKey);
       });
@@ -193,38 +214,62 @@ class TokenManager {
 
   async _refreshDhanToken({ userId, accountId = null, connectionId = null }) {
     const startTime = Date.now();
-    const currentToken = await this._getBrokerConnectionToken(userId, 'DHAN', accountId, connectionId);
+    try {
+      const currentToken = await this._getBrokerConnectionToken(userId, 'DHAN', accountId, connectionId);
 
-    if (!currentToken?.access_token) {
-      throw new Error('Cannot auto-refresh Dhan token: no existing token on broker connection');
+      if (!currentToken?.access_token) {
+        throw new Error('Cannot auto-refresh Dhan token: no existing token on broker connection');
+      }
+
+      const renewed = await dhanAuthProvider.renewToken(
+        currentToken.access_token,
+        accountId || currentToken.account_id || null
+      );
+
+      const resolvedExpiry = renewed.expires_at || new Date(Date.now() + (20 * 60 * 60 * 1000));
+
+      await this.storeTokenData({
+        user_id: userId,
+        brokerType: 'DHAN',
+        accountId: accountId || currentToken.account_id || null,
+        connectionId,
+        access_token: renewed.access_token,
+        refresh_token: renewed.refresh_token || currentToken.refresh_token || null,
+        expires_at: resolvedExpiry,
+        mode: 'automated',
+        refresh_status: 'success',
+        error_reason: null
+      });
+
+      return {
+        access_token: renewed.access_token,
+        refresh_token: renewed.refresh_token || null,
+        expires_at: resolvedExpiry,
+        execution_time_ms: Date.now() - startTime
+      };
+    } catch (error) {
+      await this._markBrokerConnectionError(connectionId, userId, error.message);
+      throw error;
+    }
+  }
+
+  async _markBrokerConnectionError(connectionId, userId, message) {
+    if (!connectionId) {
+      return;
     }
 
-    const renewed = await dhanAuthProvider.renewToken(
-      currentToken.access_token,
-      accountId || currentToken.account_id || null
-    );
-
-    const resolvedExpiry = renewed.expires_at || new Date(Date.now() + (20 * 60 * 60 * 1000));
-
-    await this.storeTokenData({
-      user_id: userId,
-      brokerType: 'DHAN',
-      accountId: accountId || currentToken.account_id || null,
-      connectionId,
-      access_token: renewed.access_token,
-      refresh_token: renewed.refresh_token || currentToken.refresh_token || null,
-      expires_at: resolvedExpiry,
-      mode: 'automated',
-      refresh_status: 'success',
-      error_reason: null
-    });
-
-    return {
-      access_token: renewed.access_token,
-      refresh_token: renewed.refresh_token || null,
-      expires_at: resolvedExpiry,
-      execution_time_ms: Date.now() - startTime
-    };
+    try {
+      await db.query(`
+        UPDATE "BrokerConnection"
+        SET "lastError" = $1,
+            "status" = 'ERROR',
+            "updatedAt" = NOW()
+        WHERE id = $2
+          AND "userId" = $3
+      `, [String(message || 'Unknown token refresh error').substring(0, 500), connectionId, userId]);
+    } catch (updateError) {
+      logger.warn(`⚠️ Failed to persist BrokerConnection refresh error for ${connectionId}: ${updateError.message}`);
+    }
   }
 
   async storeToken(userId, tokenData) {

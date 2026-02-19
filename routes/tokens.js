@@ -116,9 +116,10 @@ router.post('/refresh', async (req, res, next) => {
       errorMessage = 'Token refresh temporarily unavailable: browser pool is recovering';
       statusCode = 503;
       retryAfterMs = retryAfterMs || error.retryAfterMs || 30000;
-      if (retryAfterMs) {
-        res.setHeader('Retry-After', Math.max(1, Math.ceil(retryAfterMs / 1000)));
-      }
+    }
+
+    if (statusCode === 503 && retryAfterMs) {
+      res.setHeader('Retry-After', Math.max(1, Math.ceil(retryAfterMs / 1000)));
     }
 
     res.status(statusCode).json({
@@ -296,7 +297,7 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
  */
 router.post('/store', authenticateService, async (req, res, next) => {
   try {
-    const { access_token, refresh_token, expires_at, mode, brokerType, accountId } = req.body;
+    const { access_token, refresh_token, expires_at, mode, brokerType, accountId, connectionId } = req.body;
     const user_id = assertProductionSafeUserId(req.body.user_id, 'store');
 
     logger.info(`💾 Storing token data for user: ${user_id} (${brokerType || 'ZERODHA'})`);
@@ -317,7 +318,8 @@ router.post('/store', authenticateService, async (req, res, next) => {
       expires_at,
       mode: mode || 'manual',
       brokerType,
-      accountId
+      accountId,
+      connectionId
     });
 
     res.json({

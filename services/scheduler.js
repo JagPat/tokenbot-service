@@ -45,8 +45,18 @@ class Scheduler {
       timezone: 'Asia/Kolkata'
     });
 
+    // Dhan proactive refresh every hour using BrokerConnection expiry metadata.
+    const dhanCronExpression = '15 * * * *';
+    cron.schedule(dhanCronExpression, async () => {
+      logger.info('⏰ [Scheduler] Dhan proactive refresh check (hourly)');
+      await this.refreshExpiringDhanConnections();
+    }, {
+      timezone: 'Asia/Kolkata'
+    });
+
     logger.info('✅ [Scheduler] Daily token refresh scheduled for 8:30 AM IST');
     logger.info('✅ [Scheduler] Proactive refresh check scheduled every 2 hours');
+    logger.info('✅ [Scheduler] Dhan proactive refresh scheduled hourly');
     logger.info(`📅 [Scheduler] Next run: ${this.getNextRunTime()}`);
 
     // Startup Check: If it's between 8:30 AM and 3:30 PM, and we don't have a valid token
@@ -182,6 +192,74 @@ class Scheduler {
       }
     } catch (error) {
       logger.error(`❌ [Scheduler] Error in proactive refresh: ${error.message}`);
+    }
+  }
+
+  async refreshExpiringDhanConnections() {
+    if (this.isRunning) {
+      logger.warn('⚠️ Token refresh already in progress, skipping Dhan proactive check');
+      return;
+    }
+
+    this.isRunning = true;
+    try {
+      const result = await db.query(`
+        SELECT
+          id,
+          "userId" AS user_id,
+          "accountId" AS account_id,
+          "expiresAt" AS expires_at,
+          "lastAuthAt" AS last_auth_at
+        FROM "BrokerConnection"
+        WHERE "brokerType" = 'DHAN'
+          AND "isActive" = true
+          AND (
+            ("expiresAt" IS NOT NULL AND "expiresAt" < NOW() + INTERVAL '2 hours')
+            OR
+            ("expiresAt" IS NULL AND ("lastAuthAt" IS NULL OR "lastAuthAt" < NOW() - INTERVAL '20 hours'))
+          )
+        ORDER BY COALESCE("expiresAt", NOW()) ASC
+        LIMIT 200
+      `);
+
+      const candidates = this._filterSchedulableUsers(result.rows || []);
+      if (candidates.length === 0) {
+        logger.info('✅ [Scheduler] No Dhan connections require proactive refresh');
+        return;
+      }
+
+      logger.info(`🔄 [Scheduler] Found ${candidates.length} Dhan connection(s) requiring refresh`);
+
+      for (const row of candidates) {
+        try {
+          await tokenManager.refreshTokenForUser(
+            row.user_id,
+            'DHAN',
+            row.account_id || null,
+            row.id
+          );
+          logger.info(`✅ [Scheduler] Dhan token refreshed for connection ${row.id}`);
+        } catch (error) {
+          logger.error(`❌ [Scheduler] Dhan refresh failed for connection ${row.id}: ${error.message}`);
+          try {
+            await db.query(`
+              UPDATE "BrokerConnection"
+              SET "status" = 'ERROR',
+                  "lastError" = $1,
+                  "updatedAt" = NOW()
+              WHERE id = $2
+            `, [String(error.message || 'Dhan auto-renew failed').substring(0, 500), row.id]);
+          } catch (persistError) {
+            logger.warn(`⚠️ [Scheduler] Could not persist Dhan refresh error for ${row.id}: ${persistError.message}`);
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      logger.error(`❌ [Scheduler] Error in Dhan proactive refresh: ${error.message}`);
+    } finally {
+      this.isRunning = false;
     }
   }
 

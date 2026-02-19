@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const logger = require('../utils/logger');
+const distributedLock = require('../services/distributedLock');
 
 // Safely import browserPool - don't crash if it fails to load
 let browserPool = null;
@@ -143,7 +144,8 @@ router.get('/', async (req, res) => {
       total_mb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
     },
     browser_pool: browserPoolStats,
-    token_refresh: tokenRefreshHealth
+    token_refresh: tokenRefreshHealth,
+    distributed_locks: distributedLock.getStatus()
   });
 });
 

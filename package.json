@@ -29,7 +29,8 @@
     "dotenv": "^17.2.3",
     "cors": "^2.8.6",
     "helmet": "^8.1.0",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "ioredis": "^5.9.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
