@@ -4,7 +4,7 @@ const encryptor = require('./encryptor');
 const logger = require('../utils/logger');
 const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
-const { assertProductionSafeUserId } = require('../utils/userIdPolicy');
+const { assertProductionSafeUserId, normalizeUserId } = require('../utils/userIdPolicy');
 const distributedLock = require('./distributedLock');
 
 class TokenManager {
@@ -13,14 +13,196 @@ class TokenManager {
     this.refreshLockTtlMs = Math.max(5000, parseInt(process.env.TOKEN_REFRESH_LOCK_TTL_MS || '45000', 10));
   }
 
-  async refreshTokenForUser(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
-    const safeUserId = assertProductionSafeUserId(userId, 'refresh');
-    const normalizedBrokerType = String(brokerType || 'ZERODHA').toUpperCase();
+  _isProduction() {
+    return process.env.NODE_ENV === 'production';
+  }
+
+  _normalizeBrokerType(brokerType) {
+    const normalized = String(brokerType || 'ZERODHA').trim().toUpperCase();
+    return normalized || 'ZERODHA';
+  }
+
+  _normalizeConnectionId(connectionId) {
+    if (!connectionId || typeof connectionId !== 'string') return null;
+    const normalized = connectionId.trim();
+    if (!normalized || normalized.toLowerCase() === 'default') return null;
+    return normalized;
+  }
+
+  _normalizeAccountId(accountId) {
+    if (!accountId || typeof accountId !== 'string') return null;
+    const normalized = accountId.trim();
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  _buildError(message, statusCode = 500, code = 'TOKENBOT_ERROR') {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    error.code = code;
+    return error;
+  }
+
+  _normalizeTokenRequest(userIdOrContext, brokerType, accountId, connectionId) {
+    if (userIdOrContext && typeof userIdOrContext === 'object' && !Array.isArray(userIdOrContext)) {
+      return {
+        userId: userIdOrContext.userId || userIdOrContext.user_id || null,
+        brokerType: userIdOrContext.brokerType || userIdOrContext.broker_type || brokerType || 'ZERODHA',
+        accountId: userIdOrContext.accountId || userIdOrContext.account_id || accountId || null,
+        connectionId:
+          userIdOrContext.brokerConnectionId ||
+          userIdOrContext.broker_connection_id ||
+          userIdOrContext.connectionId ||
+          userIdOrContext.connection_id ||
+          connectionId ||
+          null,
+        correlationId: userIdOrContext.correlationId || null
+      };
+    }
+
+    return {
+      userId: userIdOrContext || null,
+      brokerType: brokerType || 'ZERODHA',
+      accountId: accountId || null,
+      connectionId: connectionId || null,
+      correlationId: null
+    };
+  }
+
+  async _resolveConnectionContext({
+    userId = null,
+    brokerType = 'ZERODHA',
+    accountId = null,
+    connectionId = null,
+    operation = 'lookup'
+  }) {
+    const normalizedBrokerType = this._normalizeBrokerType(brokerType);
+    const normalizedConnectionId = this._normalizeConnectionId(connectionId);
+    const normalizedAccountId = this._normalizeAccountId(accountId);
+    const normalizedUserId = normalizeUserId(userId);
+
+    if (normalizedConnectionId) {
+      const result = await db.query(`
+        SELECT
+          id,
+          "userId" AS user_id,
+          "brokerType" AS broker_type,
+          "accountId" AS account_id,
+          "isActive" AS is_active
+        FROM "BrokerConnection"
+        WHERE id = $1
+        LIMIT 1
+      `, [normalizedConnectionId]);
+
+      if (result.rows.length === 0) {
+        throw this._buildError(`Broker connection ${normalizedConnectionId} not found`, 404, 'BROKER_CONNECTION_NOT_FOUND');
+      }
+
+      const row = result.rows[0];
+      const safeUserId = assertProductionSafeUserId(row.user_id, operation);
+
+      if (normalizedUserId && normalizedUserId !== safeUserId) {
+        throw this._buildError('brokerConnectionId does not belong to requested user', 403, 'BROKER_CONNECTION_USER_MISMATCH');
+      }
+
+      if (normalizedBrokerType && row.broker_type !== normalizedBrokerType) {
+        throw this._buildError(
+          `brokerConnectionId ${normalizedConnectionId} is ${row.broker_type}, not ${normalizedBrokerType}`,
+          400,
+          'BROKER_CONNECTION_BROKER_MISMATCH'
+        );
+      }
+
+      if (!row.is_active && this._isProduction()) {
+        throw this._buildError(`Broker connection ${normalizedConnectionId} is inactive`, 409, 'BROKER_CONNECTION_INACTIVE');
+      }
+
+      return {
+        userId: safeUserId,
+        brokerType: row.broker_type,
+        accountId: row.account_id || normalizedAccountId || null,
+        connectionId: row.id
+      };
+    }
+
+    const safeUserId = assertProductionSafeUserId(normalizedUserId, operation);
+
+    const params = [safeUserId, normalizedBrokerType];
+    let query = `
+      SELECT
+        id,
+        "userId" AS user_id,
+        "brokerType" AS broker_type,
+        "accountId" AS account_id
+      FROM "BrokerConnection"
+      WHERE "userId" = $1
+        AND "brokerType" = $2
+        AND "isActive" = true
+    `;
+
+    if (normalizedAccountId) {
+      query += ` AND "accountId" = $3`;
+      params.push(normalizedAccountId);
+    }
+
+    query += `
+      ORDER BY
+        "lastSyncAt" DESC NULLS LAST,
+        "updatedAt" DESC
+      LIMIT 2
+    `;
+
+    const fallbackResult = await db.query(query, params);
+
+    if (fallbackResult.rows.length === 0) {
+      throw this._buildError(
+        `No active ${normalizedBrokerType} broker connection found for user ${safeUserId}`,
+        404,
+        'BROKER_CONNECTION_NOT_FOUND'
+      );
+    }
+
+    if (fallbackResult.rows.length > 1 && this._isProduction()) {
+      throw this._buildError(
+        `brokerConnectionId is required for ${operation}; multiple ${normalizedBrokerType} connections exist for user ${safeUserId}`,
+        409,
+        'BROKER_CONNECTION_AMBIGUOUS'
+      );
+    }
+
+    const resolved = fallbackResult.rows[0];
+    return {
+      userId: safeUserId,
+      brokerType: resolved.broker_type,
+      accountId: resolved.account_id || normalizedAccountId || null,
+      connectionId: resolved.id
+    };
+  }
+
+  _isAuthErrorMessage(message) {
+    const normalized = String(message || '').toLowerCase();
+    return (
+      normalized.includes('unauthorized') ||
+      normalized.includes('invalid') ||
+      normalized.includes('expired') ||
+      normalized.includes('token') ||
+      normalized.includes('auth')
+    );
+  }
+
+  async refreshTokenForUser(userIdOrContext, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
+    const request = this._normalizeTokenRequest(userIdOrContext, brokerType, accountId, connectionId);
+    const resolvedContext = await this._resolveConnectionContext({
+      userId: request.userId,
+      brokerType: request.brokerType,
+      accountId: request.accountId,
+      connectionId: request.connectionId,
+      operation: 'refresh'
+    });
+    resolvedContext.correlationId = request.correlationId || null;
     const refreshKey = [
-      normalizedBrokerType,
-      safeUserId,
-      accountId || 'primary',
-      connectionId || 'default'
+      resolvedContext.brokerType,
+      resolvedContext.connectionId,
+      resolvedContext.userId
     ].join(':');
 
     const inFlight = this.inFlightRefreshes.get(refreshKey);
@@ -45,10 +227,11 @@ class TokenManager {
 
       try {
         return await this._refreshTokenForUserInternal({
-          userId: safeUserId,
-          brokerType: normalizedBrokerType,
-          accountId,
-          connectionId
+          userId: resolvedContext.userId,
+          brokerType: resolvedContext.brokerType,
+          accountId: resolvedContext.accountId,
+          connectionId: resolvedContext.connectionId,
+          correlationId: resolvedContext.correlationId
         });
       } finally {
         await distributedLock.release(lock);
@@ -62,19 +245,19 @@ class TokenManager {
     return refreshPromise;
   }
 
-  async _refreshTokenForUserInternal({ userId, brokerType = 'ZERODHA', accountId = null, connectionId = null }) {
+  async _refreshTokenForUserInternal({ userId, brokerType = 'ZERODHA', accountId = null, connectionId = null, correlationId = null }) {
     if (brokerType === 'ZERODHA') {
-      return this._refreshLegacyZerodhaToken({ userId, accountId, connectionId });
+      return this._refreshLegacyZerodhaToken({ userId, accountId, connectionId, correlationId });
     }
 
     if (brokerType === 'DHAN') {
-      return this._refreshDhanToken({ userId, accountId, connectionId });
+      return this._refreshDhanToken({ userId, accountId, connectionId, correlationId });
     }
 
     throw new Error(`Auto-refresh for ${brokerType} is not implemented`);
   }
 
-  async _refreshLegacyZerodhaToken({ userId, accountId = null, connectionId = null }) {
+  async _refreshLegacyZerodhaToken({ userId, accountId = null, connectionId = null, correlationId = null }) {
     let attemptNumber = 0;
     const maxAttempts = 3;
 
@@ -185,7 +368,10 @@ class TokenManager {
       await this.logAttempt(userId, attemptNumber, 'success', null, tokenData.execution_time_ms);
 
       logger.info(`✅ Token generated successfully for user ${userId}`);
-      return tokenData;
+      return {
+        ...tokenData,
+        broker_connection_id: connectionId
+      };
 
     } catch (error) {
       // Log failure
@@ -207,12 +393,13 @@ class TokenManager {
         }
       }
 
+      await this._markBrokerConnectionError(connectionId, userId, error.message, correlationId);
       logger.error(`❌ Token generation failed for user ${userId}: ${error.message}`);
       throw error;
     }
   }
 
-  async _refreshDhanToken({ userId, accountId = null, connectionId = null }) {
+  async _refreshDhanToken({ userId, accountId = null, connectionId = null, correlationId = null }) {
     const startTime = Date.now();
     try {
       const currentToken = await this._getBrokerConnectionToken(userId, 'DHAN', accountId, connectionId);
@@ -245,28 +432,34 @@ class TokenManager {
         access_token: renewed.access_token,
         refresh_token: renewed.refresh_token || null,
         expires_at: resolvedExpiry,
-        execution_time_ms: Date.now() - startTime
+        execution_time_ms: Date.now() - startTime,
+        broker_connection_id: connectionId
       };
     } catch (error) {
-      await this._markBrokerConnectionError(connectionId, userId, error.message);
+      await this._markBrokerConnectionError(connectionId, userId, error.message, correlationId);
       throw error;
     }
   }
 
-  async _markBrokerConnectionError(connectionId, userId, message) {
+  async _markBrokerConnectionError(connectionId, userId, message, correlationId = null) {
     if (!connectionId) {
       return;
     }
+
+    const safeMessage = String(message || 'Unknown token refresh error').substring(0, 500);
+    const correlationSuffix = correlationId ? ` [ref: ${correlationId}]` : '';
+    const persistedMessage = `${safeMessage}${correlationSuffix}`.substring(0, 500);
+    const nextStatus = this._isAuthErrorMessage(message) ? 'REAUTH_REQUIRED' : 'ERROR';
 
     try {
       await db.query(`
         UPDATE "BrokerConnection"
         SET "lastError" = $1,
-            "status" = 'ERROR',
+            "status" = $2,
             "updatedAt" = NOW()
-        WHERE id = $2
-          AND "userId" = $3
-      `, [String(message || 'Unknown token refresh error').substring(0, 500), connectionId, userId]);
+        WHERE id = $3
+          AND "userId" = $4
+      `, [persistedMessage, nextStatus, connectionId, userId]);
     } catch (updateError) {
       logger.warn(`⚠️ Failed to persist BrokerConnection refresh error for ${connectionId}: ${updateError.message}`);
     }
@@ -385,15 +578,29 @@ class TokenManager {
    */
   async storeTokenData(tokenData) {
     const { user_id, brokerType, accountId, connectionId, access_token, refresh_token, expires_at, mode, refresh_status, error_reason } = tokenData;
+    const normalizedBrokerType = this._normalizeBrokerType(brokerType || 'ZERODHA');
+    const normalizedConnectionId = this._normalizeConnectionId(connectionId);
 
     // Source of truth for live broker sessions is BrokerConnection.
     const shouldPersistBrokerConnection = Boolean(
-      connectionId || accountId || (brokerType && brokerType !== 'ZERODHA')
+      normalizedConnectionId || accountId || (normalizedBrokerType && normalizedBrokerType !== 'ZERODHA')
     );
 
+    if (this._isProduction() && !normalizedConnectionId) {
+      throw this._buildError(
+        `brokerConnectionId is required to store ${normalizedBrokerType} token data in production`,
+        400,
+        'BROKER_CONNECTION_REQUIRED'
+      );
+    }
+
     if (shouldPersistBrokerConnection) {
-      const brokerResult = await this.storeBrokerConnectionToken(tokenData);
-      if (brokerType && brokerType !== 'ZERODHA') {
+      const brokerResult = await this.storeBrokerConnectionToken({
+        ...tokenData,
+        brokerType: normalizedBrokerType,
+        connectionId: normalizedConnectionId
+      });
+      if (normalizedBrokerType !== 'ZERODHA') {
         return brokerResult;
       }
     }
@@ -451,16 +658,33 @@ class TokenManager {
    * @param {string} accountId - Optional specific account ID
    * @returns {Object|null} Current token data or null if not found
    */
-  async getCurrentToken(userId, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
-    const safeUserId = assertProductionSafeUserId(userId, 'lookup');
-    const brokerToken = await this._getBrokerConnectionToken(safeUserId, brokerType, accountId, connectionId);
+  async getCurrentToken(userIdOrContext, brokerType = 'ZERODHA', accountId = null, connectionId = null) {
+    const request = this._normalizeTokenRequest(userIdOrContext, brokerType, accountId, connectionId);
+    const resolvedContext = await this._resolveConnectionContext({
+      userId: request.userId,
+      brokerType: request.brokerType,
+      accountId: request.accountId,
+      connectionId: request.connectionId,
+      operation: 'lookup'
+    });
+    const brokerToken = await this._getBrokerConnectionToken(
+      resolvedContext.userId,
+      resolvedContext.brokerType,
+      resolvedContext.accountId,
+      resolvedContext.connectionId
+    );
 
     if (brokerToken?.access_token) {
       return brokerToken;
     }
 
-    if (brokerType === 'ZERODHA') {
-      return this._getLegacyZerodhaToken(safeUserId);
+    const allowLegacyFallback =
+      !this._isProduction() &&
+      resolvedContext.brokerType === 'ZERODHA' &&
+      !request.connectionId;
+
+    if (allowLegacyFallback) {
+      return this._getLegacyZerodhaToken(resolvedContext.userId);
     }
 
     return null;
@@ -563,6 +787,7 @@ class TokenManager {
     logger.info(`🔍 Getting current token for user: ${userId} (${brokerType})`);
 
     try {
+      const normalizedConnectionId = this._normalizeConnectionId(connectionId);
       let query = `
         SELECT
           id,
@@ -578,10 +803,18 @@ class TokenManager {
       `;
       let params = [];
 
-      if (connectionId) {
+      if (normalizedConnectionId) {
         query += ` WHERE id = $1 AND "userId" = $2`;
-        params = [connectionId, userId];
+        params = [normalizedConnectionId, userId];
       } else {
+        if (this._isProduction()) {
+          throw this._buildError(
+            `brokerConnectionId is required for ${brokerType} token lookup in production`,
+            400,
+            'BROKER_CONNECTION_REQUIRED'
+          );
+        }
+
         query += ` WHERE "userId" = $1 AND "brokerType" = $2 AND "isActive" = true`;
         params = [userId, brokerType];
 
@@ -638,8 +871,17 @@ class TokenManager {
 
   async storeBrokerConnectionToken(tokenData) {
     const { user_id, brokerType = 'ZERODHA', accountId, connectionId, access_token, refresh_token, expires_at } = tokenData;
+    const normalizedConnectionId = this._normalizeConnectionId(connectionId);
 
-    logger.info(`💾 Storing ${brokerType} token for user: ${user_id}${connectionId ? ` (connection ${connectionId})` : ''}`);
+    logger.info(`💾 Storing ${brokerType} token for user: ${user_id}${normalizedConnectionId ? ` (connection ${normalizedConnectionId})` : ''}`);
+
+    if (this._isProduction() && !normalizedConnectionId) {
+      throw this._buildError(
+        `brokerConnectionId is required to persist ${brokerType} tokens in production`,
+        400,
+        'BROKER_CONNECTION_REQUIRED'
+      );
+    }
 
     try {
       // Encrypt access token
@@ -666,9 +908,9 @@ class TokenManager {
       `;
       let params = [accessTokenEncrypted, refresh_token || null, expires_at || null];
 
-      if (connectionId) {
+      if (normalizedConnectionId) {
         query += ` WHERE id = $4 AND "userId" = $5`;
-        params.push(connectionId, user_id);
+        params.push(normalizedConnectionId, user_id);
       } else {
         query += ` WHERE "userId" = $4 AND "brokerType" = $5`;
         params.push(user_id, brokerType);

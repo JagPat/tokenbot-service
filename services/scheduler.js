@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const { randomUUID } = require('crypto');
 const db = require('../config/database');
 const tokenManager = require('./tokenManager');
 const logger = require('../utils/logger');
@@ -20,6 +21,60 @@ class Scheduler {
       logger.warn(`⚠️ [Scheduler] Skipping ${skipped} default-user records in production`);
     }
     return filtered;
+  }
+
+  _isAuthError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    const statusCode = Number(error?.statusCode || error?.status || 0);
+    return (
+      statusCode === 401 ||
+      statusCode === 403 ||
+      message.includes('token') ||
+      message.includes('auth') ||
+      message.includes('invalid') ||
+      message.includes('expired') ||
+      message.includes('unauthorized')
+    );
+  }
+
+  async _listZerodhaConnections({ expiringOnly = false } = {}) {
+    let query = `
+      SELECT
+        bc.id,
+        bc."userId" AS user_id,
+        bc."accountId" AS account_id,
+        bc."expiresAt" AS expires_at,
+        bc."lastAuthAt" AS last_auth_at,
+        bc."status" AS status,
+        kuc.kite_user_id
+      FROM "BrokerConnection" bc
+      INNER JOIN kite_user_credentials kuc
+        ON kuc.user_id = bc."userId"
+      WHERE bc."brokerType" = 'ZERODHA'
+        AND bc."isActive" = true
+        AND kuc.is_active = true
+        AND kuc.auto_refresh_enabled = true
+    `;
+
+    if (expiringOnly) {
+      query += `
+        AND (
+          (bc."expiresAt" IS NOT NULL AND bc."expiresAt" < NOW() + INTERVAL '3 hours')
+          OR
+          (bc."expiresAt" IS NULL AND (bc."lastAuthAt" IS NULL OR bc."lastAuthAt" < NOW() - INTERVAL '20 hours'))
+        )
+      `;
+    }
+
+    query += `
+      ORDER BY
+        COALESCE(bc."expiresAt", NOW()) ASC,
+        bc."updatedAt" DESC
+      LIMIT 500
+    `;
+
+    const result = await db.query(query);
+    return this._filterSchedulableUsers(result.rows || []);
   }
 
   start() {
@@ -68,28 +123,21 @@ class Scheduler {
     try {
       logger.info('🔍 [Scheduler] Running startup token check...');
 
-      // Get all active users
-      const usersResult = await db.query(`
-        SELECT user_id, kite_user_id 
-        FROM kite_user_credentials 
-        WHERE is_active = true AND auto_refresh_enabled = true
-      `);
-
-      const schedulableUsers = this._filterSchedulableUsers(usersResult.rows);
+      const schedulableUsers = await this._listZerodhaConnections();
 
       if (schedulableUsers.length === 0) {
         logger.info('ℹ️ [Scheduler] No active users found for startup check');
         return;
       }
 
-      logger.info(`🔍 [Scheduler] Checking tokens for ${schedulableUsers.length} active users...`);
+      logger.info(`🔍 [Scheduler] Checking tokens for ${schedulableUsers.length} active Zerodha connection(s)...`);
 
       let needsRefreshCount = 0;
       for (const user of schedulableUsers) {
-        const needsRefresh = await this._checkIfTokenNeeded(user.user_id);
+        const needsRefresh = await this._checkIfTokenNeeded(user);
         if (needsRefresh) {
           needsRefreshCount++;
-          logger.warn(`⚠️ [Scheduler] User ${user.user_id} needs token refresh`);
+          logger.warn(`⚠️ [Scheduler] Connection ${user.id} (user ${user.user_id}) needs token refresh`);
         }
       }
 
@@ -108,13 +156,10 @@ class Scheduler {
     }
   }
 
-  async _checkIfTokenNeeded(userId) {
+  async _checkIfTokenNeeded(connectionRow) {
     try {
-      const token = await tokenManager.getValidToken(userId);
-      // specific logic: if no token OR token expires in < 2 hours (proactive buffer)
-      if (!token) return true;
-
-      const expiresAt = new Date(token.expires_at);
+      if (!connectionRow?.expires_at) return true;
+      const expiresAt = new Date(connectionRow.expires_at);
       const now = new Date();
       const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
 
@@ -135,63 +180,59 @@ class Scheduler {
       return;
     }
 
+    this.isRunning = true;
     try {
-      // Get all users with tokens expiring in next 3 hours
-      const result = await db.query(`
-        SELECT DISTINCT st.user_id, st.expires_at, kuc.kite_user_id
-        FROM stored_tokens st
-        INNER JOIN kite_user_credentials kuc ON st.user_id = kuc.user_id
-        WHERE kuc.is_active = true 
-          AND kuc.auto_refresh_enabled = true
-          AND st.expires_at > NOW()
-          AND st.expires_at < NOW() + INTERVAL '3 hours'
-          AND (st.refresh_status IS NULL OR st.refresh_status != 'refreshing')
-        ORDER BY st.expires_at ASC
-      `);
-
-      const expiringUsers = this._filterSchedulableUsers(result.rows);
+      const expiringUsers = await this._listZerodhaConnections({ expiringOnly: true });
       if (expiringUsers.length === 0) {
-        logger.info('✅ [Scheduler] No tokens expiring soon (next 3 hours)');
+        logger.info('✅ [Scheduler] No Zerodha connections expiring soon (next 3 hours)');
         return;
       }
 
-      logger.info(`🔄 [Scheduler] Found ${expiringUsers.length} tokens expiring soon, refreshing...`);
+      logger.info(`🔄 [Scheduler] Found ${expiringUsers.length} Zerodha connection(s) expiring soon, refreshing...`);
 
       for (const row of expiringUsers) {
-        const expiresAt = new Date(row.expires_at);
         const now = new Date();
-        const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
+        const hasExpiry = !!row.expires_at;
+        const hoursUntilExpiry = hasExpiry
+          ? (new Date(row.expires_at) - now) / (1000 * 60 * 60)
+          : 0;
 
-        if (hoursUntilExpiry < 2) {
-          logger.info(`⏰ [Scheduler] Token for ${row.user_id} expires in ${hoursUntilExpiry.toFixed(1)} hours, refreshing...`);
+        if (!hasExpiry || hoursUntilExpiry < 2) {
+          logger.info(`⏰ [Scheduler] Token for connection ${row.id} (user ${row.user_id}) expires in ${hoursUntilExpiry.toFixed(1)} hours, refreshing...`);
+          const correlationId = randomUUID();
           try {
-            // Mark as refreshing to prevent duplicate refreshes
-            await db.query(`
-              UPDATE stored_tokens 
-              SET refresh_status = 'refreshing', updated_at = NOW()
-              WHERE user_id = $1
-            `, [row.user_id]);
+            await tokenManager.refreshTokenForUser({
+              userId: row.user_id,
+              brokerType: 'ZERODHA',
+              accountId: row.account_id || null,
+              brokerConnectionId: row.id,
+              correlationId
+            });
+            logger.info(`✅ [Scheduler] Proactively refreshed token for connection ${row.id}`);
 
-            await tokenManager.refreshTokenForUser(row.user_id);
-            logger.info(`✅ [Scheduler] Proactively refreshed token for ${row.user_id}`);
-            
             // Small delay between users
             await new Promise(resolve => setTimeout(resolve, 2000));
           } catch (error) {
-            logger.error(`❌ [Scheduler] Failed to proactively refresh token for ${row.user_id}: ${error.message}`);
-            // Reset status on failure
+            logger.error(`❌ [Scheduler] Failed to proactively refresh connection ${row.id}: ${error.message}`);
+            const status = this._isAuthError(error) ? 'REAUTH_REQUIRED' : 'ERROR';
             await db.query(`
-              UPDATE stored_tokens 
-              SET refresh_status = 'failed', 
-                  error_reason = $1,
-                  updated_at = NOW()
-              WHERE user_id = $2
-            `, [error.message.substring(0, 500), row.user_id]);
+              UPDATE "BrokerConnection"
+              SET "status" = $1,
+                  "lastError" = $2,
+                  "updatedAt" = NOW()
+              WHERE id = $3
+            `, [
+              status,
+              `${String(error.message || 'Zerodha auto-refresh failed').substring(0, 450)} [ref: ${correlationId}]`,
+              row.id
+            ]);
           }
         }
       }
     } catch (error) {
       logger.error(`❌ [Scheduler] Error in proactive refresh: ${error.message}`);
+    } finally {
+      this.isRunning = false;
     }
   }
 
@@ -231,24 +272,31 @@ class Scheduler {
       logger.info(`🔄 [Scheduler] Found ${candidates.length} Dhan connection(s) requiring refresh`);
 
       for (const row of candidates) {
+        const correlationId = randomUUID();
         try {
-          await tokenManager.refreshTokenForUser(
-            row.user_id,
-            'DHAN',
-            row.account_id || null,
-            row.id
-          );
+          await tokenManager.refreshTokenForUser({
+            userId: row.user_id,
+            brokerType: 'DHAN',
+            accountId: row.account_id || null,
+            brokerConnectionId: row.id,
+            correlationId
+          });
           logger.info(`✅ [Scheduler] Dhan token refreshed for connection ${row.id}`);
         } catch (error) {
           logger.error(`❌ [Scheduler] Dhan refresh failed for connection ${row.id}: ${error.message}`);
+          const status = this._isAuthError(error) ? 'REAUTH_REQUIRED' : 'ERROR';
           try {
             await db.query(`
               UPDATE "BrokerConnection"
-              SET "status" = 'ERROR',
-                  "lastError" = $1,
+              SET "status" = $1,
+                  "lastError" = $2,
                   "updatedAt" = NOW()
-              WHERE id = $2
-            `, [String(error.message || 'Dhan auto-renew failed').substring(0, 500), row.id]);
+              WHERE id = $3
+            `, [
+              status,
+              `${String(error.message || 'Dhan auto-renew failed').substring(0, 450)} [ref: ${correlationId}]`,
+              row.id
+            ]);
           } catch (persistError) {
             logger.warn(`⚠️ [Scheduler] Could not persist Dhan refresh error for ${row.id}: ${persistError.message}`);
           }
@@ -292,16 +340,11 @@ class Scheduler {
     const startTime = Date.now();
 
     try {
-      const result = await db.query(`
-        SELECT user_id, kite_user_id FROM kite_user_credentials 
-        WHERE is_active = true AND auto_refresh_enabled = true
-      `);
-
-      const users = this._filterSchedulableUsers(result.rows);
-      logger.info(`📋 [Scheduler] Found ${users.length} users for token refresh`);
+      const users = await this._listZerodhaConnections();
+      logger.info(`📋 [Scheduler] Found ${users.length} Zerodha connection(s) for token refresh`);
 
       if (users.length === 0) {
-        logger.info('ℹ️ No users to refresh');
+        logger.info('ℹ️ No Zerodha connections to refresh');
         return { success: [], failed: [] };
       }
 
@@ -318,22 +361,43 @@ class Scheduler {
         while (attempt < maxRetries && !success) {
           attempt++;
           try {
-            logger.info(`🔄 Processing user: ${user.user_id} (${user.kite_user_id}) [attempt ${attempt}/${maxRetries}]`);
-            await tokenManager.refreshTokenForUser(user.user_id);
-            results.success.push(user.user_id);
-            logger.info(`✅ Success: ${user.user_id}`);
+            const correlationId = randomUUID();
+            logger.info(`🔄 Processing connection: ${user.id} (user ${user.user_id}, kite ${user.kite_user_id}) [attempt ${attempt}/${maxRetries}]`);
+            await tokenManager.refreshTokenForUser({
+              userId: user.user_id,
+              brokerType: 'ZERODHA',
+              accountId: user.account_id || null,
+              brokerConnectionId: user.id,
+              correlationId
+            });
+            results.success.push(user.id);
+            logger.info(`✅ Success: ${user.id}`);
             success = true;
           } catch (error) {
             if (error.message.includes('Browser pool exhausted') && attempt < maxRetries) {
-              logger.warn(`⏳ Pool exhausted for ${user.user_id}, waiting 30s before retry (attempt ${attempt}/${maxRetries})...`);
+              logger.warn(`⏳ Pool exhausted for connection ${user.id}, waiting 30s before retry (attempt ${attempt}/${maxRetries})...`);
               await new Promise(resolve => setTimeout(resolve, 30000));
             } else {
+              const correlationId = randomUUID();
+              const status = this._isAuthError(error) ? 'REAUTH_REQUIRED' : 'ERROR';
+              await db.query(`
+                UPDATE "BrokerConnection"
+                SET "status" = $1,
+                    "lastError" = $2,
+                    "updatedAt" = NOW()
+                WHERE id = $3
+              `, [
+                status,
+                `${String(error.message || 'Zerodha refresh failed').substring(0, 450)} [ref: ${correlationId}]`,
+                user.id
+              ]).catch(() => { });
               results.failed.push({
+                connection_id: user.id,
                 user_id: user.user_id,
                 kite_user_id: user.kite_user_id,
                 error: error.message
               });
-              logger.error(`❌ Failed: ${user.user_id} - ${error.message}`);
+              logger.error(`❌ Failed: ${user.id} (${user.user_id}) - ${error.message}`);
               break;
             }
           }
