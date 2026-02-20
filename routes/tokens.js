@@ -1,4 +1,5 @@
 const express = require('express');
+const { randomUUID } = require('crypto');
 const router = express.Router();
 const tokenManager = require('../services/tokenManager');
 const { authenticateUser, authenticateService } = require('../middleware/auth');
@@ -32,22 +33,46 @@ function isTransientBrowserFailure(error) {
   ].some((needle) => message.includes(needle));
 }
 
+function resolveCorrelationId(req) {
+  const headerCorrelationId = req.headers['x-correlation-id'];
+  if (headerCorrelationId && typeof headerCorrelationId === 'string' && headerCorrelationId.trim()) {
+    return headerCorrelationId.trim();
+  }
+  return randomUUID();
+}
+
+function resolveConnectionId(req) {
+  const direct =
+    req.body?.brokerConnectionId ||
+    req.body?.connectionId ||
+    req.query?.brokerConnectionId ||
+    req.query?.connectionId ||
+    null;
+  return typeof direct === 'string' && direct.trim() ? direct.trim() : null;
+}
+
 /**
  * POST /api/tokens/refresh
  * Token refresh (supports both user and service authentication)
  */
 router.post('/refresh', async (req, res, next) => {
+  const correlationId = resolveCorrelationId(req);
+  res.setHeader('x-correlation-id', correlationId);
+
   try {
     // Support both user authentication and service-to-service calls
     let user_id = null;
+    const connectionId = resolveConnectionId(req);
+    const brokerType = String(req.body.brokerType || req.query.brokerType || 'ZERODHA').toUpperCase();
+    const accountId = req.body.accountId || req.query.accountId;
 
     // Check if authenticated user (user endpoint)
     if (req.user && req.user.user_id) {
       user_id = req.user.user_id;
-      logger.info(`🔄 User token refresh requested for user: ${user_id}`);
+      logger.info(`🔄 User token refresh requested for user: ${user_id} (connection: ${connectionId || 'none'})`);
     }
     // Check if service-to-service call (backend endpoint)
-    else if (req.body.user_id || req.query.user_id) {
+    else if (req.body.user_id || req.query.user_id || connectionId) {
       // Verify service API key for service-to-service calls
       const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
@@ -55,47 +80,56 @@ router.post('/refresh', async (req, res, next) => {
       if (!expectedApiKey) {
         return res.status(500).json({
           success: false,
-          error: 'Service auth is not configured on TokenBot'
+          error: 'Service auth is not configured on TokenBot',
+          correlationId
         });
       }
 
       if (!serviceApiKey || serviceApiKey !== expectedApiKey) {
         return res.status(401).json({
           success: false,
-          error: 'Unauthorized service call'
+          error: 'Unauthorized service call',
+          correlationId
         });
       }
 
-      user_id = req.body.user_id || req.query.user_id;
-      logger.info(`🔄 Service token refresh requested for user: ${user_id}`);
+      user_id = req.body.user_id || req.query.user_id || null;
+      logger.info(`🔄 Service token refresh requested for user: ${user_id || 'resolved-via-connection'} (connection: ${connectionId || 'none'})`);
     } else {
       return res.status(400).json({
         success: false,
-        error: 'Missing user_id'
+        error: 'Missing brokerConnectionId or user_id',
+        correlationId
       });
     }
 
-    user_id = assertProductionSafeUserId(user_id, 'refresh');
+    if (user_id) {
+      user_id = assertProductionSafeUserId(user_id, 'refresh');
+    }
 
-    const brokerType = String(req.body.brokerType || req.query.brokerType || 'ZERODHA').toUpperCase();
-    const accountId = req.body.accountId || req.query.accountId;
-    const connectionId = req.body.connectionId || req.query.connectionId;
-
-    const tokenData = await tokenManager.refreshTokenForUser(user_id, brokerType, accountId, connectionId);
+    const tokenData = await tokenManager.refreshTokenForUser({
+      userId: user_id,
+      brokerType,
+      accountId,
+      brokerConnectionId: connectionId,
+      correlationId
+    });
 
     res.json({
       success: true,
       message: 'Token refreshed successfully',
+      correlationId,
       data: {
         access_token: tokenData.access_token,
         expires_at: tokenData.expires_at,
         login_time: tokenData.login_time,
-        execution_time_ms: tokenData.execution_time_ms
+        execution_time_ms: tokenData.execution_time_ms,
+        broker_connection_id: tokenData.broker_connection_id || connectionId || null
       }
     });
 
   } catch (error) {
-    logger.error('Error refreshing token:', error);
+    logger.error(`Error refreshing token [ref: ${correlationId}]:`, error);
 
     // Provide user-friendly error messages
     let errorMessage = error.message;
@@ -116,6 +150,21 @@ router.post('/refresh', async (req, res, next) => {
       errorMessage = 'Token refresh temporarily unavailable: browser pool is recovering';
       statusCode = 503;
       retryAfterMs = retryAfterMs || error.retryAfterMs || 30000;
+    } else if (error.code === 'INVALID_DEFAULT_USER') {
+      statusCode = 400;
+      retryAfterMs = null;
+    } else if (error.code === 'BROKER_CONNECTION_AMBIGUOUS') {
+      statusCode = 409;
+      retryAfterMs = null;
+    } else if (error.code === 'BROKER_CONNECTION_REQUIRED') {
+      statusCode = 400;
+      retryAfterMs = null;
+    } else if (error.code === 'BROKER_CONNECTION_NOT_FOUND') {
+      statusCode = 404;
+      retryAfterMs = null;
+    } else if (error.code === 'BROKER_CONNECTION_USER_MISMATCH') {
+      statusCode = 403;
+      retryAfterMs = null;
     }
 
     if (statusCode === 503 && retryAfterMs) {
@@ -125,6 +174,7 @@ router.post('/refresh', async (req, res, next) => {
     res.status(statusCode).json({
       success: false,
       error: errorMessage,
+      correlationId,
       retry_after_ms: retryAfterMs,
       hint: error.message.includes('incomplete') ? 'Use POST /api/credentials with all required fields (kite_user_id, password, totp_secret, api_key, api_secret) to complete credential setup.' : undefined
     });
@@ -179,40 +229,53 @@ router.get('/status', authenticateUser, async (req, res, next) => {
  * Get current token for a user
  */
 router.get('/current', authenticateService, async (req, res, next) => {
+  const correlationId = resolveCorrelationId(req);
+  res.setHeader('x-correlation-id', correlationId);
+
   try {
-    const { brokerType, accountId, connectionId } = req.query;
+    const { brokerType, accountId } = req.query;
+    const connectionId = resolveConnectionId(req);
     const user_id = normalizeUserId(req.query.user_id);
 
-    if (!user_id) {
+    if (!user_id && !connectionId) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required parameter: user_id'
+        error: 'Missing required parameter: brokerConnectionId or user_id',
+        correlationId
       });
     }
 
-    const safeUserId = assertProductionSafeUserId(user_id, 'lookup');
+    const safeUserId = user_id ? assertProductionSafeUserId(user_id, 'lookup') : null;
 
-    logger.info(`🔍 Getting current token for user: ${safeUserId} (Broker: ${brokerType || 'Default'})`);
+    logger.info(`🔍 Getting current token for user: ${safeUserId || 'resolved-via-connection'} (Broker: ${brokerType || 'Default'}, connection: ${connectionId || 'none'})`);
 
-    const tokenData = await tokenManager.getCurrentToken(safeUserId, String(brokerType || 'ZERODHA').toUpperCase(), accountId, connectionId);
+    const tokenData = await tokenManager.getCurrentToken({
+      userId: safeUserId,
+      brokerType: String(brokerType || 'ZERODHA').toUpperCase(),
+      accountId,
+      brokerConnectionId: connectionId
+    });
 
     if (!tokenData) {
       return res.status(404).json({
         success: false,
-        error: 'No token found for user'
+        error: 'No token found for user/connection',
+        correlationId
       });
     }
 
     res.json({
       success: true,
+      correlationId,
       data: tokenData
     });
 
   } catch (error) {
-    logger.error('Error getting current token:', error);
+    logger.error(`Error getting current token [ref: ${correlationId}]:`, error);
     res.status(error.statusCode || 500).json({
       success: false,
-      error: error.message
+      error: error.message,
+      correlationId
     });
   }
 });
@@ -296,8 +359,15 @@ router.get('/:userId', authenticateService, async (req, res, next) => {
  * Store token data for a user
  */
 router.post('/store', authenticateService, async (req, res, next) => {
+  const correlationId = resolveCorrelationId(req);
+  res.setHeader('x-correlation-id', correlationId);
+
   try {
-    const { access_token, refresh_token, expires_at, mode, brokerType, accountId, connectionId } = req.body;
+    const { access_token, refresh_token, expires_at, mode, brokerType, accountId } = req.body;
+    const connectionId =
+      req.body?.brokerConnectionId ||
+      req.body?.connectionId ||
+      null;
     const user_id = assertProductionSafeUserId(req.body.user_id, 'store');
 
     logger.info(`💾 Storing token data for user: ${user_id} (${brokerType || 'ZERODHA'})`);
@@ -319,20 +389,23 @@ router.post('/store', authenticateService, async (req, res, next) => {
       mode: mode || 'manual',
       brokerType,
       accountId,
-      connectionId
+      connectionId,
+      brokerConnectionId: connectionId
     });
 
     res.json({
       success: true,
       message: 'Token data stored successfully',
+      correlationId,
       data: result
     });
 
   } catch (error) {
-    logger.error('Error storing token data:', error);
+    logger.error(`Error storing token data [ref: ${correlationId}]:`, error);
     res.status(error.statusCode || 500).json({
       success: false,
-      error: error.message
+      error: error.message,
+      correlationId
     });
   }
 });
