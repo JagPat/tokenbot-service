@@ -37,18 +37,18 @@ router.post('/', async (req, res, next) => {
   try {
     // Support both user authentication and service-to-service calls
     let user_id = null;
-    
+
     // Check if authenticated user (user endpoint)
     if (req.user && req.user.user_id) {
       user_id = req.user.user_id;
       logger.info(`📝 User credential save requested for user: ${user_id}`);
-    } 
+    }
     // Check if service-to-service call (backend endpoint)
     else if (req.body.user_id || req.query.user_id) {
       // Verify service API key for service-to-service calls
       const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
-      
+
       if (!expectedApiKey) {
         return res.status(500).json({
           success: false,
@@ -62,7 +62,7 @@ router.post('/', async (req, res, next) => {
           error: 'Unauthorized service call'
         });
       }
-      
+
       user_id = req.body.user_id || req.query.user_id;
       logger.info(`📝 Service credential sync requested for user: ${user_id}`);
     } else {
@@ -71,21 +71,21 @@ router.post('/', async (req, res, next) => {
         error: 'Missing user_id or authentication'
       });
     }
-    
+
     const safeUserId = assertProductionSafeUserId(user_id, 'credentials');
     const { kite_user_id, password, totp_secret, api_key, api_secret, auto_refresh_enabled } = req.body;
-    
+
     logger.info(`📝 Saving credentials for user: ${safeUserId}`);
-    
+
     // Validate required fields
     if (!kite_user_id || !password || !totp_secret || !api_key || !api_secret) {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         error: 'All credential fields are required',
         required: ['kite_user_id', 'password', 'totp_secret', 'api_key', 'api_secret']
       });
     }
-    
+
     // Validate TOTP secret format
     if (totp_secret.length < 16) {
       return res.status(400).json({
@@ -101,14 +101,14 @@ router.post('/', async (req, res, next) => {
       api_key: encryptor.encrypt(api_key),
       api_secret: encryptor.encrypt(api_secret)
     };
-    
-    // Upsert credentials
+
+    // Upsert credentials — always activate when full credentials are provided
     const result = await db.query(`
       INSERT INTO kite_user_credentials (
         user_id, kite_user_id, encrypted_password, encrypted_totp_secret,
-        encrypted_api_key, encrypted_api_secret, auto_refresh_enabled
+        encrypted_api_key, encrypted_api_secret, auto_refresh_enabled, is_active
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, true)
       ON CONFLICT (user_id)
       DO UPDATE SET
         kite_user_id = $2,
@@ -117,6 +117,7 @@ router.post('/', async (req, res, next) => {
         encrypted_api_key = $5,
         encrypted_api_secret = $6,
         auto_refresh_enabled = $7,
+        is_active = true,
         updated_at = NOW()
       RETURNING id, user_id, kite_user_id, is_active, auto_refresh_enabled
     `, [
@@ -125,13 +126,13 @@ router.post('/', async (req, res, next) => {
     ]);
 
     logger.info(`✅ Credentials saved for user: ${safeUserId}`);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       message: 'Credentials saved successfully',
       data: result.rows[0]
     });
-    
+
   } catch (error) {
     logger.error('Error saving credentials:', error);
     next(error);
@@ -145,7 +146,7 @@ router.post('/', async (req, res, next) => {
 router.get('/status', authenticateUser, async (req, res, next) => {
   try {
     const { user_id } = req.user;
-    
+
     const result = await db.query(`
       SELECT 
         kite_user_id, 
@@ -157,25 +158,25 @@ router.get('/status', authenticateUser, async (req, res, next) => {
       FROM kite_user_credentials 
       WHERE user_id = $1
     `, [user_id]);
-    
+
     if (result.rows.length === 0) {
-      return res.json({ 
-        success: true, 
-        data: { 
+      return res.json({
+        success: true,
+        data: {
           configured: false,
-          message: 'No credentials configured' 
-        } 
+          message: 'No credentials configured'
+        }
       });
     }
-    
-    res.json({ 
-      success: true, 
-      data: { 
-        configured: true, 
-        ...result.rows[0] 
-      } 
+
+    res.json({
+      success: true,
+      data: {
+        configured: true,
+        ...result.rows[0]
+      }
     });
-    
+
   } catch (error) {
     logger.error('Error fetching credential status:', error);
     next(error);
@@ -189,9 +190,9 @@ router.get('/status', authenticateUser, async (req, res, next) => {
 router.delete('/', authenticateUser, async (req, res, next) => {
   try {
     const { user_id } = req.user;
-    
+
     logger.info(`🗑️ Deleting credentials for user: ${user_id}`);
-    
+
     const result = await db.query(
       'DELETE FROM kite_user_credentials WHERE user_id = $1 RETURNING user_id',
       [user_id]
@@ -203,14 +204,14 @@ router.delete('/', authenticateUser, async (req, res, next) => {
         error: 'No credentials found to delete'
       });
     }
-    
+
     logger.info(`✅ Credentials deleted for user: ${user_id}`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Credentials deleted successfully' 
+
+    res.json({
+      success: true,
+      message: 'Credentials deleted successfully'
     });
-    
+
   } catch (error) {
     logger.error('Error deleting credentials:', error);
     next(error);
@@ -276,7 +277,7 @@ router.patch('/api-key', async (req, res, next) => {
         AND table_name = 'kite_user_credentials'
       )
     `);
-    
+
     if (!tableCheck.rows[0].exists) {
       logger.error('❌ CRITICAL: kite_user_credentials table does not exist!');
       logger.error('   This indicates migrations did not run or database connection issue');
@@ -296,7 +297,7 @@ router.patch('/api-key', async (req, res, next) => {
     // Service-to-service authentication (no user auth required)
     const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
     const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
-    
+
     if (!expectedApiKey) {
       return res.status(500).json({
         success: false,
@@ -314,7 +315,7 @@ router.patch('/api-key', async (req, res, next) => {
     const requestedUserId = req.body.user_id || req.query.user_id || resolveServiceUserId();
     const user_id = assertProductionSafeUserId(requestedUserId, 'credentials');
     const { api_key, api_secret } = req.body;
-    
+
     if (!api_key) {
       return res.status(400).json({
         success: false,
@@ -334,7 +335,7 @@ router.patch('/api-key', async (req, res, next) => {
     // This allows API key sync to work even when full credentials aren't set up yet
     if (existing.rows.length === 0) {
       logger.info(`ℹ️ Credentials not found for user ${user_id}. Creating minimal credentials with API key only.`);
-      
+
       // Create minimal credentials - API key is required, other fields can be set later
       // Use placeholder values that will be updated when full credentials are created
       const encrypted = {
@@ -408,7 +409,7 @@ router.patch('/api-key', async (req, res, next) => {
     logger.info(`🗑️ Invalidated tokens after API key update for user: ${user_id}`);
 
     logger.info(`✅ API key updated successfully for user: ${user_id}`);
-    
+
     res.json({
       success: true,
       message: 'API key updated successfully. Tokens have been invalidated and will be regenerated.',
