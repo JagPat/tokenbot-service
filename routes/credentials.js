@@ -140,6 +140,120 @@ router.post('/', async (req, res, next) => {
 });
 
 /**
+ * POST /api/credentials/dhan
+ * Save/update Dhan broker credentials (service-to-service, API key auth).
+ * Fields: user_id, client_id, password, api_key, api_secret, [totp_secret], [redirect_uri]
+ */
+router.post('/dhan', async (req, res, next) => {
+  try {
+    // Service-to-service authentication
+    const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+    const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
+
+    if (!expectedApiKey || !serviceApiKey || serviceApiKey !== expectedApiKey) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const {
+      user_id: bodyUserId,
+      client_id,
+      dhan_user_id,
+      password,
+      api_key,
+      api_secret,
+      totp_secret,
+      redirect_uri,
+      broker_connection_id,
+    } = req.body;
+
+    const safeUserId = bodyUserId || resolveServiceUserId();
+    if (!safeUserId) {
+      return res.status(400).json({ success: false, error: 'user_id is required' });
+    }
+
+    assertProductionSafeUserId(safeUserId);
+
+    if (!client_id || !api_key) {
+      return res.status(400).json({
+        success: false,
+        error: 'Required fields: client_id, api_key',
+        optional: ['password', 'api_secret', 'totp_secret', 'redirect_uri']
+      });
+    }
+
+    // Encrypt fields (password and secrets are optional for read-only API access)
+    const encrypted = {
+      api_key: encryptor.encrypt(api_key),
+      api_secret: api_secret ? encryptor.encrypt(api_secret) : null,
+      password: password ? encryptor.encrypt(password) : null,
+      totp_secret: totp_secret ? encryptor.encrypt(totp_secret) : null,
+    };
+
+    // Ensure dhan_user_credentials table exists
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS dhan_user_credentials (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        dhan_user_id TEXT,
+        encrypted_api_key TEXT NOT NULL,
+        encrypted_api_secret TEXT,
+        encrypted_password TEXT,
+        encrypted_totp_secret TEXT,
+        redirect_uri TEXT,
+        broker_connection_id TEXT,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        auto_refresh_enabled BOOLEAN NOT NULL DEFAULT true,
+        last_used TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // Upsert — always activate when credentials are saved
+    const result = await db.query(`
+      INSERT INTO dhan_user_credentials (
+        user_id, client_id, dhan_user_id,
+        encrypted_api_key, encrypted_api_secret,
+        encrypted_password, encrypted_totp_secret,
+        redirect_uri, broker_connection_id,
+        is_active, auto_refresh_enabled, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, true, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET
+        client_id = $2,
+        dhan_user_id = COALESCE($3, dhan_user_credentials.dhan_user_id),
+        encrypted_api_key = $4,
+        encrypted_api_secret = COALESCE($5, dhan_user_credentials.encrypted_api_secret),
+        encrypted_password = COALESCE($6, dhan_user_credentials.encrypted_password),
+        encrypted_totp_secret = COALESCE($7, dhan_user_credentials.encrypted_totp_secret),
+        redirect_uri = COALESCE($8, dhan_user_credentials.redirect_uri),
+        broker_connection_id = COALESCE($9, dhan_user_credentials.broker_connection_id),
+        is_active = true,
+        updated_at = NOW()
+      RETURNING id, user_id, client_id, is_active, auto_refresh_enabled
+    `, [
+      safeUserId, client_id, dhan_user_id || client_id,
+      encrypted.api_key, encrypted.api_secret,
+      encrypted.password, encrypted.totp_secret,
+      redirect_uri || null, broker_connection_id || null
+    ]);
+
+    logger.info(`✅ Dhan credentials saved for user: ${safeUserId}, client: ${client_id}`);
+    res.json({
+      success: true,
+      message: 'Dhan credentials saved successfully',
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    logger.error('Error saving Dhan credentials:', error);
+    next(error);
+  }
+});
+
+/**
  * GET /api/credentials/status
  * Get credential status (without sensitive data)
  */
