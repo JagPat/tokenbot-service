@@ -6,11 +6,15 @@ const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
 const { assertProductionSafeUserId, normalizeUserId } = require('../utils/userIdPolicy');
 const distributedLock = require('./distributedLock');
+const DhanTokenManager = require('./token-managers/DhanTokenManager');
+const ZerodhaTokenManager = require('./token-managers/ZerodhaTokenManager');
 
 class TokenManager {
   constructor() {
     this.inFlightRefreshes = new Map();
     this.refreshLockTtlMs = Math.max(5000, parseInt(process.env.TOKEN_REFRESH_LOCK_TTL_MS || '45000', 10));
+    this.dhanManager = new DhanTokenManager();
+    this.zerodhaManager = new ZerodhaTokenManager();
   }
 
   _isProduction() {
@@ -245,200 +249,62 @@ class TokenManager {
     return refreshPromise;
   }
 
-  async _refreshTokenForUserInternal({ userId, brokerType = 'ZERODHA', accountId = null, connectionId = null, correlationId = null }) {
+
+  async _refreshTokenForUserInternal(context) {
+    const { userId, brokerType = 'ZERODHA', accountId = null, connectionId = null, correlationId = null } = context;
+
+    let manager;
     if (brokerType === 'ZERODHA') {
-      return this._refreshLegacyZerodhaToken({ userId, accountId, connectionId, correlationId });
+      manager = this.zerodhaManager;
+    } else if (brokerType === 'DHAN') {
+      manager = this.dhanManager;
+    } else {
+      throw new Error(`Auto-refresh for ${brokerType} is not implemented`);
     }
 
-    if (brokerType === 'DHAN') {
-      return this._refreshDhanToken({ userId, accountId, connectionId, correlationId });
-    }
-
-    throw new Error(`Auto-refresh for ${brokerType} is not implemented`);
-  }
-
-  async _refreshLegacyZerodhaToken({ userId, accountId = null, connectionId = null, correlationId = null }) {
-    let attemptNumber = 0;
-    const maxAttempts = 3;
-
+    // Fetch the current token context to pass to the manager
+    let currentToken = null;
     try {
-      logger.info(`🔄 Starting token refresh for user: ${userId}`);
+      currentToken = await this._getBrokerConnectionToken(userId, brokerType, accountId, connectionId);
+    } catch (e) { /* ignore */ }
 
-      // Get encrypted credentials - first check active, then check inactive if needed
-      let credsResult = await db.query(
-        `SELECT * FROM kite_user_credentials WHERE user_id = $1 AND is_active = true`,
-        [userId]
-      );
+    const result = await manager.refresh({ ...context, currentToken });
 
-      // If no active credentials, check for inactive ones (might be incomplete)
-      if (credsResult.rows.length === 0) {
-        const inactiveResult = await db.query(
-          `SELECT * FROM kite_user_credentials WHERE user_id = $1 AND is_active = false`,
-          [userId]
-        );
-
-        if (inactiveResult.rows.length > 0) {
-          const inactiveCreds = inactiveResult.rows[0];
-          // Check if credentials are incomplete (placeholders)
-          if (inactiveCreds.kite_user_id === 'pending' || inactiveCreds.kite_user_id === 'pending_setup') {
-            throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please use POST /api/credentials to set them up.`);
-          }
-          // If inactive but complete, they might have been deactivated - still can't use them
-          throw new Error(`Credentials for user ${userId} exist but are marked as inactive. Please activate them or create new credentials via POST /api/credentials`);
-        }
-
-        // No credentials at all (neither active nor inactive)
-        throw new Error(`No active credentials found for user ${userId}. Please configure full credentials via POST /api/credentials`);
-      }
-
-      const creds = credsResult.rows[0];
-
-      // Check if credentials are just placeholders (not fully set up)
-      if (creds.kite_user_id === 'pending' || creds.kite_user_id === 'pending_setup') {
-        throw new Error(`Credentials for user ${userId} are incomplete. API key is set, but full credentials (kite_user_id, password, totp_secret) are required for token generation. Please create full credentials via POST /api/credentials with all required fields.`);
-      }
-
-      // Also check if password/totp are placeholders
-      try {
-        const decryptedPassword = encryptor.decrypt(creds.encrypted_password);
-        if (decryptedPassword === 'pending' || decryptedPassword === 'pending_setup') {
-          throw new Error(`Credentials for user ${userId} are incomplete. Full credentials (kite_user_id, password, totp_secret) are required. Please use POST /api/credentials to set them up.`);
-        }
-      } catch (decryptError) {
-        // If decryption fails, credentials might be corrupted - treat as incomplete
-        throw new Error(`Credentials for user ${userId} appear to be incomplete or corrupted. Please recreate full credentials via POST /api/credentials`);
-      }
-
-      logger.info(`✅ Credentials found for user: ${userId}`);
-
-      // Decrypt credentials
-      const decryptedCreds = {
-        kite_user_id: creds.kite_user_id,
-        password: encryptor.decrypt(creds.encrypted_password),
-        totp_secret: encryptor.decrypt(creds.encrypted_totp_secret),
-        api_key: encryptor.decrypt(creds.encrypted_api_key),
-        api_secret: encryptor.decrypt(creds.encrypted_api_secret)
-      };
-
-      logger.info(`🔓 Credentials decrypted successfully`);
-
-      // Retry logic with exponential backoff
-      const tokenData = await retryWithBackoff(
-        async () => {
-          attemptNumber++;
-          logger.info(`📝 Token generation attempt ${attemptNumber}/${maxAttempts} for user ${userId}`);
-          return await tokenFetcher.fetchAccessToken(decryptedCreds);
-        },
-        maxAttempts,
-        (error, attempt) => {
-          logger.warn(`⚠️ Attempt ${attempt} failed for user ${userId}: ${error.message}`);
-        }
-      );
-
-      // Store token in kite_tokens table
-      await this.storeToken(userId, tokenData);
-
+    if (result.success) {
       // Sync token to stored_tokens table so getCurrentToken() can find it
       try {
         await this.storeTokenData({
           user_id: userId,
-          brokerType: 'ZERODHA',
+          brokerType,
           accountId,
           connectionId,
-          access_token: tokenData.access_token,
-          refresh_token: tokenData.refresh_token || '',
-          expires_at: tokenData.expires_at,
+          access_token: result.access_token,
+          refresh_token: result.refresh_token || '',
+          expires_at: result.expires_at || result.next_refresh_at,
           mode: 'automated',
           refresh_status: 'success',
           error_reason: null
         });
-        logger.info(`✅ Token synced to stored_tokens for user: ${userId}`);
       } catch (syncError) {
-        // If table is missing, this is critical - fail the refresh
-        if (syncError.message.includes('stored_tokens table missing') ||
-          syncError.message.includes('relation "stored_tokens" does not exist')) {
-          logger.error(`❌ CRITICAL: Cannot store token - schema incomplete. Failing refresh.`);
-          throw syncError;
-        }
-        // Log but don't fail - kite_tokens storage succeeded
         logger.error(`❌ Failed to sync token to stored_tokens for user ${userId}: ${syncError.message}`);
       }
-
-      // Log success
-      await this.logAttempt(userId, attemptNumber, 'success', null, tokenData.execution_time_ms);
-
-      logger.info(`✅ Token generated successfully for user ${userId}`);
-      return {
-        ...tokenData,
-        broker_connection_id: connectionId
-      };
-
-    } catch (error) {
-      // Log failure
-      await this.logAttempt(userId, attemptNumber || maxAttempts, 'failed', error.message, null);
-
-      // Update stored_tokens with failure status if it exists
+    } else {
+      // Log failure to stored tokens if it exists
       try {
         await db.query(`
-          UPDATE stored_tokens 
-          SET refresh_status = 'failed', 
-              error_reason = $1,
-              updated_at = NOW()
-          WHERE user_id = $2
-        `, [error.message.substring(0, 500), userId]);
-      } catch (updateError) {
-        // Ignore if table doesn't exist - will be caught by migration check
-        if (!updateError.message.includes('relation "stored_tokens" does not exist')) {
-          logger.warn(`⚠️ Could not update refresh status: ${updateError.message}`);
-        }
-      }
+            UPDATE stored_tokens 
+            SET refresh_status = 'failed', 
+                error_reason = $1,
+                updated_at = NOW()
+            WHERE user_id = $2 AND "brokerType" = $3
+          `, [result.error.substring(0, 500), userId, brokerType]);
+      } catch (e) { }
 
-      await this._markBrokerConnectionError(connectionId, userId, error.message, correlationId);
-      logger.error(`❌ Token generation failed for user ${userId}: ${error.message}`);
-      throw error;
+      await this._markBrokerConnectionError(connectionId, userId, result.error, correlationId);
+      throw new Error(result.error);
     }
-  }
 
-  async _refreshDhanToken({ userId, accountId = null, connectionId = null, correlationId = null }) {
-    const startTime = Date.now();
-    try {
-      const currentToken = await this._getBrokerConnectionToken(userId, 'DHAN', accountId, connectionId);
-
-      if (!currentToken?.access_token) {
-        throw new Error('Cannot auto-refresh Dhan token: no existing token on broker connection');
-      }
-
-      const renewed = await dhanAuthProvider.renewToken(
-        currentToken.access_token,
-        accountId || currentToken.account_id || null
-      );
-
-      const resolvedExpiry = renewed.expires_at || new Date(Date.now() + (20 * 60 * 60 * 1000));
-
-      await this.storeTokenData({
-        user_id: userId,
-        brokerType: 'DHAN',
-        accountId: accountId || currentToken.account_id || null,
-        connectionId,
-        access_token: renewed.access_token,
-        refresh_token: renewed.refresh_token || currentToken.refresh_token || null,
-        expires_at: resolvedExpiry,
-        mode: 'automated',
-        refresh_status: 'success',
-        error_reason: null
-      });
-
-      return {
-        access_token: renewed.access_token,
-        refresh_token: renewed.refresh_token || null,
-        expires_at: resolvedExpiry,
-        execution_time_ms: Date.now() - startTime,
-        broker_connection_id: connectionId
-      };
-    } catch (error) {
-      await this._markBrokerConnectionError(connectionId, userId, error.message, correlationId);
-      throw error;
-    }
+    return result;
   }
 
   async _markBrokerConnectionError(connectionId, userId, message, correlationId = null) {
@@ -897,7 +763,11 @@ class TokenManager {
       let query = `
         UPDATE "BrokerConnection"
         SET 
-          "accessTokenEncrypted" = $1,
+          "credentialsEncrypted" = jsonb_set(
+            COALESCE("credentialsEncrypted", '{}'::jsonb),
+            '{access_token}',
+            to_jsonb($1::text)
+          ),
           "refreshToken" = $2,
           "expiresAt" = $3,
           "lastAuthAt" = NOW(),
@@ -906,7 +776,7 @@ class TokenManager {
           "lastError" = NULL,
           "isActive" = true
       `;
-      let params = [accessTokenEncrypted, refresh_token || null, expires_at || null];
+      let params = [access_token, refresh_token || null, expires_at || null];
 
       if (normalizedConnectionId) {
         query += ` WHERE id = $4 AND "userId" = $5`;
