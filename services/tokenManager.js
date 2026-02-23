@@ -82,7 +82,7 @@ class TokenManager {
     const normalizedBrokerType = this._normalizeBrokerType(brokerType);
     const normalizedConnectionId = this._normalizeConnectionId(connectionId);
     const normalizedAccountId = this._normalizeAccountId(accountId);
-    const normalizedUserId = normalizeUserId(userId);
+    const normalizedUserId = assertProductionSafeUserId(userId, operation);
 
     if (normalizedConnectionId) {
       const result = await db.query(`
