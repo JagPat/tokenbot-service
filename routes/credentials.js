@@ -536,4 +536,63 @@ router.patch('/api-key', async (req, res, next) => {
   }
 });
 
+/**
+ * POST /api/credentials/migrate
+ * Migrate all credentials from an old user_id to a new user_id
+ * Service-to-service authentication only
+ */
+router.post('/migrate', async (req, res, next) => {
+  try {
+    const serviceApiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+    const expectedApiKey = process.env.SERVICE_API_KEY || process.env.TOKENBOT_API_KEY;
+
+    if (!expectedApiKey || !serviceApiKey || serviceApiKey !== expectedApiKey) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { oldUserId, newUserId } = req.body;
+    if (!oldUserId || !newUserId) {
+      return res.status(400).json({ success: false, error: 'oldUserId and newUserId are required' });
+    }
+
+    logger.info(`🚚 Migrating credentials from ${oldUserId} to ${newUserId}`);
+
+    let zerodhaCount = 0;
+    try {
+      const result = await db.query(`
+        UPDATE kite_user_credentials
+        SET user_id = $2, updated_at = NOW()
+        WHERE user_id = $1
+      `, [oldUserId, newUserId]);
+      zerodhaCount = result.rowCount;
+      // Also migrate stored tokens if any
+      await db.query(`UPDATE stored_tokens SET user_id = $2 WHERE user_id = $1`, [oldUserId, newUserId]);
+    } catch (e) {
+      logger.warn(`Failed to migrate Zerodha credentials: ${e.message}`);
+    }
+
+    let dhanCount = 0;
+    try {
+      const result = await db.query(`
+        UPDATE dhan_user_credentials
+        SET user_id = $2, updated_at = NOW()
+        WHERE user_id = $1
+      `, [oldUserId, newUserId]);
+      dhanCount = result.rowCount;
+    } catch (e) {
+      logger.warn(`Failed to migrate Dhan credentials: ${e.message}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'Migration complete',
+      data: { migratedZerodha: zerodhaCount, migratedDhan: dhanCount }
+    });
+
+  } catch (error) {
+    logger.error('Error migrating credentials:', error);
+    next(error);
+  }
+});
+
 module.exports = router;
