@@ -296,7 +296,7 @@ class TokenManager {
             SET refresh_status = 'failed', 
                 error_reason = $1,
                 updated_at = NOW()
-            WHERE user_id = $2 AND "brokerType" = $3
+            WHERE user_id = $2 AND broker_type = $3
           `, [result.error.substring(0, 500), userId, brokerType]);
       } catch (e) { }
 
