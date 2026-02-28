@@ -58,7 +58,16 @@ class DhanTokenManager extends TokenManager {
 
         // 2. Optional fallback table for older deployments.
         // In production we prefer BrokerConnection.credentialsEncrypted as the canonical store.
+        // Use to_regclass first so missing table doesn't trigger relation errors.
         try {
+            const legacyTableCheck = await db.query(
+                `SELECT to_regclass('public.dhan_user_credentials') AS legacy_table`
+            );
+
+            if (!legacyTableCheck.rows[0]?.legacy_table) {
+                throw this._buildMissingCredentialsError(connectionId);
+            }
+
             const result = await db.query(
                 `SELECT * FROM dhan_user_credentials WHERE user_id = $1 AND is_active = true LIMIT 1`,
                 [userId]

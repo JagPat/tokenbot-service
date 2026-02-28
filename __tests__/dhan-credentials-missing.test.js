@@ -11,6 +11,8 @@ describe('DhanTokenManager missing credentials handling', () => {
       .fn()
       // BrokerConnection.credentialsEncrypted lookup
       .mockResolvedValueOnce({ rows: [{ credentialsEncrypted: null }] })
+      // Legacy table existence check (simulate race/mismatch where table appears present)
+      .mockResolvedValueOnce({ rows: [{ legacy_table: 'dhan_user_credentials' }] })
       // Legacy fallback table lookup
       .mockRejectedValueOnce(legacyTableMissing);
 
