@@ -165,6 +165,10 @@ router.post('/refresh', async (req, res, next) => {
     } else if (error.code === 'BROKER_CONNECTION_USER_MISMATCH') {
       statusCode = 403;
       retryAfterMs = null;
+    } else if (error.code === 'DHAN_CREDENTIALS_MISSING') {
+      statusCode = error.statusCode || 422;
+      errorMessage = 'DHAN_CREDENTIALS_MISSING';
+      retryAfterMs = null;
     }
 
     if (statusCode === 503 && retryAfterMs) {
@@ -176,6 +180,9 @@ router.post('/refresh', async (req, res, next) => {
       error: errorMessage,
       correlationId,
       retry_after_ms: retryAfterMs,
+      guidance: error.code === 'DHAN_CREDENTIALS_MISSING'
+        ? (error.guidance || 'Reconnect and save credentials')
+        : undefined,
       hint: error.message.includes('incomplete') ? 'Use POST /api/credentials with all required fields (kite_user_id, password, totp_secret, api_key, api_secret) to complete credential setup.' : undefined
     });
   }

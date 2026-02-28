@@ -13,8 +13,15 @@ class TokenManager {
   constructor() {
     this.inFlightRefreshes = new Map();
     this.refreshLockTtlMs = Math.max(5000, parseInt(process.env.TOKEN_REFRESH_LOCK_TTL_MS || '45000', 10));
+    this.allowLegacyStoredTokenFallback = String(process.env.LEGACY_ALLOW_STORED_TOKENS || 'false').toLowerCase() === 'true';
     this.dhanManager = new DhanTokenManager();
     this.zerodhaManager = new ZerodhaTokenManager();
+
+    if (this._isProduction()) {
+      this._logLegacyStoredTokenRows().catch((error) => {
+        logger.warn(`⚠️ Could not inspect legacy stored_tokens rows at startup: ${error.message}`);
+      });
+    }
   }
 
   _isProduction() {
@@ -56,6 +63,18 @@ class TokenManager {
     error.statusCode = statusCode;
     error.code = code;
     return error;
+  }
+
+  async _logLegacyStoredTokenRows() {
+    const result = await db.query(`
+      SELECT COUNT(*)::int AS total
+      FROM stored_tokens
+      WHERE broker_connection_id LIKE 'legacy:%'
+    `);
+    const total = Number(result.rows[0]?.total || 0);
+    if (total > 0) {
+      logger.warn(`⚠️ Detected ${total} legacy stored_tokens row(s) with broker_connection_id starting 'legacy:'. Use manual relink script before disabling fallback permanently.`);
+    }
   }
 
   _normalizeTokenRequest(userIdOrContext, brokerType, accountId, connectionId) {
@@ -280,7 +299,9 @@ class TokenManager {
     let currentToken = null;
     try {
       currentToken = await this._getBrokerConnectionToken(userId, brokerType, accountId, connectionId);
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      logger.warn(`⚠️ Unable to load existing ${brokerType} token for refresh (connection: ${connectionId || 'n/a'}): ${e.code || 'TOKEN_LOOKUP_FAILED'} ${e.message}`);
+    }
 
     const result = await manager.refresh({ ...context, currentToken });
 
@@ -312,11 +333,20 @@ class TokenManager {
                 error_reason = $1,
                 updated_at = NOW()
             WHERE broker_connection_id = $2
-          `, [result.error.substring(0, 500), storedTokenKey]);
+          `, [String(result.error || 'Token refresh failed').substring(0, 500), storedTokenKey]);
       } catch (e) { }
 
-      await this._markBrokerConnectionError(connectionId, userId, result.error, correlationId);
-      throw new Error(result.error);
+      const failureMessage = String(result.error || 'Token refresh failed');
+      const failureCode = String(result.error_code || 'TOKEN_REFRESH_FAILED');
+      const failureStatusCode = Number(result.statusCode || 0) || (failureCode === 'DHAN_CREDENTIALS_MISSING' ? 422 : 500);
+
+      await this._markBrokerConnectionError(connectionId, userId, failureMessage, correlationId);
+
+      const refreshError = this._buildError(failureMessage, failureStatusCode, failureCode);
+      if (result.guidance) {
+        refreshError.guidance = result.guidance;
+      }
+      throw refreshError;
     }
 
     return result;
@@ -580,24 +610,35 @@ class TokenManager {
     }
 
     const allowLegacyFallback =
-      !this._isProduction() &&
+      this.allowLegacyStoredTokenFallback &&
       resolvedContext.brokerType === 'ZERODHA' &&
       !request.connectionId;
 
     if (allowLegacyFallback) {
+      logger.warn(`⚠️ LEGACY stored_tokens fallback enabled for user ${resolvedContext.userId}. This path should be disabled in production.`);
       return this._getLegacyZerodhaToken(resolvedContext.userId);
+    }
+
+    if (!this.allowLegacyStoredTokenFallback && resolvedContext.brokerType === 'ZERODHA' && !request.connectionId) {
+      logger.warn(`⚠️ Legacy stored_tokens fallback is disabled. Token lookup requires BrokerConnection data (user: ${resolvedContext.userId}).`);
     }
 
     return null;
   }
 
   async _getLegacyZerodhaToken(userId) {
+    if (!this.allowLegacyStoredTokenFallback) {
+      logger.warn(`⚠️ Legacy stored_tokens lookup requested while LEGACY_ALLOW_STORED_TOKENS=false (user: ${userId})`);
+      return null;
+    }
+
     logger.info(`🔍 Getting current token for user: ${userId} (Legacy Zerodha)`);
 
     try {
       const result = await db.query(`
         SELECT 
           user_id,
+          broker_connection_id,
           access_token,
           refresh_token,
           expires_at,
@@ -658,6 +699,9 @@ class TokenManager {
       }
 
       const token = result.rows[0];
+      if (String(token.broker_connection_id || '').startsWith('legacy:')) {
+        logger.warn(`⚠️ Encountered legacy stored_tokens key for user ${userId}: ${token.broker_connection_id}`);
+      }
 
       // Check if token is expired or expiring soon
       const expiresAt = new Date(token.expires_at);
@@ -742,8 +786,23 @@ class TokenManager {
         try {
           accessToken = encryptor.decrypt(row.accessTokenEncrypted);
         } catch (decErr) {
-          logger.error(`❌ Failed to decrypt access token for user ${userId}: ${decErr.message}`);
-          return null;
+          const decryptError = this._buildError(
+            `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: ${decErr.message}`,
+            500,
+            'TOKEN_DECRYPT_FAILED_FORMAT'
+          );
+          decryptError.brokerConnectionId = row.id;
+          throw decryptError;
+        }
+
+        if (!accessToken) {
+          const decryptError = this._buildError(
+            `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: decrypted token is empty`,
+            500,
+            'TOKEN_DECRYPT_FAILED_FORMAT'
+          );
+          decryptError.brokerConnectionId = row.id;
+          throw decryptError;
         }
       }
 
@@ -785,24 +844,13 @@ class TokenManager {
     }
 
     try {
-      // Encrypt access token
+      // Encrypt access token using canonical GCM format (compatible with Core/Web).
       const accessTokenEncrypted = encryptor.encrypt(access_token);
-
-      // Update BrokerConnection
-      // We assume the connection exists (created via UI). This method just updates the token.
-      // If it doesn't exist, we can't create it fully here (missing metadata etc).
-      // But we can try to Upsert if we have accountId?
-      // Strict Rule: BrokerConnection must be created by UI/Core first?
-      // Safe bet: UPDATE only.
 
       let query = `
         UPDATE "BrokerConnection"
         SET 
-          "credentialsEncrypted" = jsonb_set(
-            COALESCE("credentialsEncrypted", '{}'::jsonb),
-            '{access_token}',
-            to_jsonb($1::text)
-          ),
+          "accessTokenEncrypted" = $1,
           "refreshToken" = $2,
           "expiresAt" = $3,
           "lastAuthAt" = NOW(),
@@ -811,7 +859,7 @@ class TokenManager {
           "lastError" = NULL,
           "isActive" = true
       `;
-      let params = [access_token, refresh_token || null, expires_at || null];
+      let params = [accessTokenEncrypted, refresh_token || null, expires_at || null];
 
       if (normalizedConnectionId) {
         query += ` WHERE id = $4 AND "userId" = $5`;

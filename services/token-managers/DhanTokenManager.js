@@ -25,6 +25,17 @@ class DhanTokenManager extends TokenManager {
      * Get Dhan credentials from dhan_user_credentials table.
      * Falls back to BrokerConnection.credentialsEncrypted.
      */
+    _buildMissingCredentialsError(connectionId = null) {
+        const error = new Error('DHAN_CREDENTIALS_MISSING');
+        error.code = 'DHAN_CREDENTIALS_MISSING';
+        error.statusCode = 422;
+        error.guidance = 'Reconnect and save credentials';
+        if (connectionId) {
+            error.brokerConnectionId = connectionId;
+        }
+        return error;
+    }
+
     async _getCredentials(userId, connectionId) {
         // 1. Check BrokerConnection.credentialsEncrypted first (preferred)
         if (connectionId) {
@@ -33,23 +44,35 @@ class DhanTokenManager extends TokenManager {
                 [connectionId]
             );
             if (connResult.rows.length > 0 && connResult.rows[0].credentialsEncrypted) {
-                let creds = connResult.rows[0].credentialsEncrypted;
-                if (typeof creds === 'string') creds = JSON.parse(creds);
-                if (creds.client_id && (creds.encrypted_password || creds.access_token)) {
-                    return creds;
+                try {
+                    let creds = connResult.rows[0].credentialsEncrypted;
+                    if (typeof creds === 'string') creds = JSON.parse(creds);
+                    if (creds.client_id && (creds.encrypted_password || creds.access_token)) {
+                        return creds;
+                    }
+                } catch (parseError) {
+                    logger.warn(`[DhanTokenManager] Failed to parse credentialsEncrypted for ${connectionId}: ${parseError.message}`);
                 }
             }
         }
 
-        // 2. Check dhan_user_credentials (centralised table like kite_user_credentials)
-        const result = await db.query(
-            `SELECT * FROM dhan_user_credentials WHERE user_id = $1 AND is_active = true LIMIT 1`,
-            [userId]
-        );
+        // 2. Optional fallback table for older deployments.
+        // In production we prefer BrokerConnection.credentialsEncrypted as the canonical store.
+        try {
+            const result = await db.query(
+                `SELECT * FROM dhan_user_credentials WHERE user_id = $1 AND is_active = true LIMIT 1`,
+                [userId]
+            );
 
-        if (result.rows.length > 0) return result.rows[0];
+            if (result.rows.length > 0) return result.rows[0];
+        } catch (error) {
+            if (error?.code === '42P01') {
+                throw this._buildMissingCredentialsError(connectionId);
+            }
+            throw error;
+        }
 
-        throw new Error(`No active Dhan credentials found for user ${userId}. Push credentials first via POST /api/credentials/dhan`);
+        throw this._buildMissingCredentialsError(connectionId);
     }
 
     /**
@@ -139,13 +162,21 @@ class DhanTokenManager extends TokenManager {
             };
 
         } catch (error) {
-            logger.error(`[DhanTokenManager] ❌ Token refresh failed: ${error.message}`);
+            const errorCode = error?.code || null;
+            const errorMessage = errorCode === 'DHAN_CREDENTIALS_MISSING'
+                ? 'DHAN_CREDENTIALS_MISSING'
+                : error.message;
+
+            logger.error(`[DhanTokenManager] ❌ Token refresh failed: ${errorMessage}`);
             const executionTime = Date.now() - startTime;
-            await this._logTokenRefresh(connectionId, 'FAILED', error.message, executionTime, null);
+            await this._logTokenRefresh(connectionId, 'FAILED', errorMessage, executionTime, null);
 
             return {
                 success: false,
-                error: error.message,
+                error: errorMessage,
+                error_code: errorCode,
+                statusCode: Number(error?.statusCode || 0) || null,
+                guidance: error?.guidance || null,
                 execution_time_ms: executionTime,
                 token_status: 'FAILED'
             };
