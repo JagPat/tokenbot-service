@@ -39,6 +39,18 @@ class TokenManager {
     return normalized.length > 0 ? normalized : null;
   }
 
+  _buildStoredTokenKey({ connectionId = null, userId = null, brokerType = 'ZERODHA', accountId = null }) {
+    const normalizedConnectionId = this._normalizeConnectionId(connectionId);
+    if (normalizedConnectionId) {
+      return normalizedConnectionId;
+    }
+
+    const normalizedUserId = normalizeUserId(userId) || 'unknown-user';
+    const normalizedBrokerType = this._normalizeBrokerType(brokerType);
+    const normalizedAccountId = this._normalizeAccountId(accountId) || 'default';
+    return `legacy:${normalizedUserId}:${normalizedBrokerType}:${normalizedAccountId}`;
+  }
+
   _buildError(message, statusCode = 500, code = 'TOKENBOT_ERROR') {
     const error = new Error(message);
     error.statusCode = statusCode;
@@ -82,7 +94,9 @@ class TokenManager {
     const normalizedBrokerType = this._normalizeBrokerType(brokerType);
     const normalizedConnectionId = this._normalizeConnectionId(connectionId);
     const normalizedAccountId = this._normalizeAccountId(accountId);
-    const normalizedUserId = assertProductionSafeUserId(userId, operation);
+    const normalizedUserId = normalizedConnectionId
+      ? (userId ? assertProductionSafeUserId(userId, operation) : null)
+      : assertProductionSafeUserId(userId, operation);
 
     if (normalizedConnectionId) {
       const result = await db.query(`
@@ -291,13 +305,14 @@ class TokenManager {
     } else {
       // Log failure to stored tokens if it exists
       try {
+        const storedTokenKey = this._buildStoredTokenKey({ connectionId, userId, brokerType, accountId });
         await db.query(`
             UPDATE stored_tokens 
             SET refresh_status = 'failed', 
                 error_reason = $1,
                 updated_at = NOW()
-            WHERE user_id = $2 AND broker_type = $3
-          `, [result.error.substring(0, 500), userId, brokerType]);
+            WHERE broker_connection_id = $2
+          `, [result.error.substring(0, 500), storedTokenKey]);
       } catch (e) { }
 
       await this._markBrokerConnectionError(connectionId, userId, result.error, correlationId);
@@ -443,9 +458,27 @@ class TokenManager {
    * @returns {Object} Stored token data
    */
   async storeTokenData(tokenData) {
-    const { user_id, brokerType, accountId, connectionId, access_token, refresh_token, expires_at, mode, refresh_status, error_reason } = tokenData;
+    const {
+      user_id,
+      brokerType,
+      accountId,
+      connectionId,
+      brokerConnectionId,
+      access_token,
+      refresh_token,
+      expires_at,
+      mode,
+      refresh_status,
+      error_reason
+    } = tokenData;
     const normalizedBrokerType = this._normalizeBrokerType(brokerType || 'ZERODHA');
-    const normalizedConnectionId = this._normalizeConnectionId(connectionId);
+    const normalizedConnectionId = this._normalizeConnectionId(connectionId || brokerConnectionId);
+    const storedTokenKey = this._buildStoredTokenKey({
+      connectionId: normalizedConnectionId,
+      userId: user_id,
+      brokerType: normalizedBrokerType,
+      accountId
+    });
 
     // Source of truth for live broker sessions is BrokerConnection.
     const shouldPersistBrokerConnection = Boolean(
@@ -477,12 +510,13 @@ class TokenManager {
       // Insert or update token data with refresh tracking
       const result = await db.query(`
         INSERT INTO stored_tokens (
-          user_id, access_token, refresh_token, expires_at, mode, 
+          user_id, broker_connection_id, access_token, refresh_token, expires_at, mode, 
           last_refresh_at, refresh_status, error_reason, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, NOW(), NOW())
-        ON CONFLICT (user_id) 
+        VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, NOW(), NOW())
+        ON CONFLICT (broker_connection_id) 
         DO UPDATE SET 
+          user_id = EXCLUDED.user_id,
           access_token = EXCLUDED.access_token,
           refresh_token = EXCLUDED.refresh_token,
           expires_at = EXCLUDED.expires_at,
@@ -494,6 +528,7 @@ class TokenManager {
         RETURNING *
       `, [
         user_id,
+        storedTokenKey,
         access_token,
         refresh_token || '',
         expires_at,
@@ -502,7 +537,7 @@ class TokenManager {
         error_reason || null
       ]);
 
-      logger.info(`✅ Token data stored successfully for user: ${user_id} (status: ${refresh_status || 'success'})`);
+      logger.info(`✅ Token data stored successfully for user: ${user_id} (key: ${storedTokenKey}, status: ${refresh_status || 'success'})`);
       return result.rows[0];
 
     } catch (error) {

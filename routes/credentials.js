@@ -73,7 +73,17 @@ router.post('/', async (req, res, next) => {
     }
 
     const safeUserId = assertProductionSafeUserId(user_id, 'credentials');
-    const { kite_user_id, password, totp_secret, api_key, api_secret, auto_refresh_enabled } = req.body;
+    const {
+      kite_user_id,
+      password,
+      totp_secret,
+      api_key,
+      api_secret,
+      auto_refresh_enabled,
+      brokerConnectionId,
+      accountId,
+      accountLabel
+    } = req.body;
 
     logger.info(`📝 Saving credentials for user: ${safeUserId}`);
 
@@ -127,6 +137,42 @@ router.post('/', async (req, res, next) => {
 
     logger.info(`✅ Credentials saved for user: ${safeUserId}`);
 
+    if (brokerConnectionId && typeof brokerConnectionId === 'string' && brokerConnectionId.trim()) {
+      const connectionCredentialPayload = JSON.stringify({
+        kite_user_id,
+        encrypted_password: encrypted.password,
+        encrypted_totp_secret: encrypted.totp_secret,
+        encrypted_api_key: encrypted.api_key,
+        encrypted_api_secret: encrypted.api_secret
+      });
+
+      const connectionUpdate = await db.query(`
+        UPDATE "BrokerConnection"
+        SET "credentialsEncrypted" = COALESCE("credentialsEncrypted", '{}'::jsonb) || $1::jsonb,
+            "accountId" = COALESCE($2, "accountId"),
+            "accountLabel" = COALESCE($3, "accountLabel"),
+            "isActive" = true,
+            "updatedAt" = NOW()
+        WHERE id = $4
+          AND "userId" = $5
+          AND "brokerType" = 'ZERODHA'
+        RETURNING id
+      `, [
+        connectionCredentialPayload,
+        accountId || kite_user_id || null,
+        accountLabel || null,
+        brokerConnectionId.trim(),
+        safeUserId
+      ]);
+
+      if (connectionUpdate.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: `brokerConnectionId ${brokerConnectionId} not found for user`
+        });
+      }
+    }
+
     res.json({
       success: true,
       message: 'Credentials saved successfully',
@@ -164,6 +210,7 @@ router.post('/dhan', async (req, res, next) => {
       totp_secret,
       redirect_uri,
       broker_connection_id,
+      accountLabel,
     } = req.body;
 
     const safeUserId = bodyUserId || resolveServiceUserId();
@@ -241,6 +288,45 @@ router.post('/dhan', async (req, res, next) => {
     ]);
 
     logger.info(`✅ Dhan credentials saved for user: ${safeUserId}, client: ${client_id}`);
+
+    if (broker_connection_id && typeof broker_connection_id === 'string' && broker_connection_id.trim()) {
+      const connectionCredentialPayload = JSON.stringify({
+        client_id,
+        dhan_user_id: dhan_user_id || client_id,
+        encrypted_api_key: encrypted.api_key,
+        encrypted_api_secret: encrypted.api_secret,
+        encrypted_password: encrypted.password,
+        encrypted_totp_secret: encrypted.totp_secret,
+        redirect_uri: redirect_uri || null
+      });
+
+      const connectionUpdate = await db.query(`
+        UPDATE "BrokerConnection"
+        SET "credentialsEncrypted" = COALESCE("credentialsEncrypted", '{}'::jsonb) || $1::jsonb,
+            "accountId" = COALESCE($2, "accountId"),
+            "accountLabel" = COALESCE($3, "accountLabel"),
+            "isActive" = true,
+            "updatedAt" = NOW()
+        WHERE id = $4
+          AND "userId" = $5
+          AND "brokerType" = 'DHAN'
+        RETURNING id
+      `, [
+        connectionCredentialPayload,
+        client_id || null,
+        accountLabel || null,
+        broker_connection_id.trim(),
+        safeUserId
+      ]);
+
+      if (connectionUpdate.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: `broker_connection_id ${broker_connection_id} not found for user`
+        });
+      }
+    }
+
     res.json({
       success: true,
       message: 'Dhan credentials saved successfully',
@@ -518,9 +604,23 @@ router.patch('/api-key', async (req, res, next) => {
       RETURNING user_id, kite_user_id, is_active
     `, updateValues);
 
-    // Invalidate existing tokens since API key changed
-    await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [user_id]);
-    logger.info(`🗑️ Invalidated tokens after API key update for user: ${user_id}`);
+    // Invalidate existing Zerodha tokens for this user's broker connections
+    let invalidatedCount = 0;
+    try {
+      const deleteResult = await db.query(`
+        DELETE FROM stored_tokens st
+        USING "BrokerConnection" bc
+        WHERE st.broker_connection_id = bc.id
+          AND bc."userId" = $1
+          AND bc."brokerType" = 'ZERODHA'
+      `, [user_id]);
+      invalidatedCount = deleteResult.rowCount || 0;
+    } catch (deleteByConnectionError) {
+      logger.warn(`⚠️ Connection-scoped token invalidation failed, falling back to user_id delete: ${deleteByConnectionError.message}`);
+      const fallbackDelete = await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [user_id]);
+      invalidatedCount = fallbackDelete.rowCount || 0;
+    }
+    logger.info(`🗑️ Invalidated ${invalidatedCount} token row(s) after API key update for user: ${user_id}`);
 
     logger.info(`✅ API key updated successfully for user: ${user_id}`);
 
@@ -565,8 +665,17 @@ router.post('/migrate', async (req, res, next) => {
         WHERE user_id = $1
       `, [oldUserId, newUserId]);
       zerodhaCount = result.rowCount;
-      // Also migrate stored tokens if any
+      // Also migrate stored token ownership markers if any
       await db.query(`UPDATE stored_tokens SET user_id = $2 WHERE user_id = $1`, [oldUserId, newUserId]);
+      await db.query(`
+        UPDATE stored_tokens
+        SET broker_connection_id = regexp_replace(
+          broker_connection_id,
+          '^legacy:' || $1 || ':',
+          'legacy:' || $2 || ':'
+        )
+        WHERE broker_connection_id LIKE 'legacy:' || $1 || ':%'
+      `, [oldUserId, newUserId]);
     } catch (e) {
       logger.warn(`Failed to migrate Zerodha credentials: ${e.message}`);
     }

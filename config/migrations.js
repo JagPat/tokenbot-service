@@ -282,26 +282,41 @@ class MigrationRunner {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS stored_tokens (
           id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) NOT NULL UNIQUE,
+          user_id VARCHAR(255) NOT NULL,
+          broker_connection_id VARCHAR(255) NOT NULL UNIQUE,
           access_token TEXT NOT NULL,
           refresh_token TEXT,
           expires_at TIMESTAMP,
           mode VARCHAR(50) DEFAULT 'manual',
+          last_refresh_at TIMESTAMP,
+          refresh_status VARCHAR(50) DEFAULT 'pending',
+          error_reason TEXT,
           created_at TIMESTAMP DEFAULT NOW(),
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
       
-      // Add refresh tracking columns if they don't exist
+      // Add/repair columns if they don't exist
       try {
         const columnCheck = await pool.query(`
           SELECT column_name 
           FROM information_schema.columns 
           WHERE table_name = 'stored_tokens' 
-          AND column_name IN ('last_refresh_at', 'refresh_status', 'error_reason')
+          AND column_name IN ('broker_connection_id', 'last_refresh_at', 'refresh_status', 'error_reason')
         `);
         
         const existingColumns = columnCheck.rows.map(r => r.column_name);
+
+        if (!existingColumns.includes('broker_connection_id')) {
+          try {
+            await pool.query(`ALTER TABLE stored_tokens ADD COLUMN broker_connection_id VARCHAR(255);`);
+            logger.info('✅ Added broker_connection_id column to stored_tokens');
+          } catch (addError) {
+            if (!addError.message.includes('already exists') && !addError.message.includes('duplicate')) {
+              logger.warn(`⚠️ Could not add broker_connection_id: ${addError.message}`);
+            }
+          }
+        }
         
         if (!existingColumns.includes('last_refresh_at')) {
           try {
@@ -338,9 +353,30 @@ class MigrationRunner {
       } catch (colError) {
         logger.warn(`⚠️ Could not check/add columns: ${colError.message}`);
       }
+
+      try {
+        await pool.query(`
+          UPDATE stored_tokens
+          SET broker_connection_id = COALESCE(broker_connection_id, 'legacy:' || user_id || ':ZERODHA:default')
+          WHERE broker_connection_id IS NULL
+        `);
+        await pool.query(`DROP INDEX IF EXISTS stored_tokens_user_id_key;`);
+        await pool.query(`DROP INDEX IF EXISTS idx_stored_tokens_user_id_key;`);
+        await pool.query(`
+          CREATE UNIQUE INDEX IF NOT EXISTS stored_tokens_broker_connection_id_key
+          ON stored_tokens(broker_connection_id)
+        `);
+        await pool.query(`
+          ALTER TABLE stored_tokens
+          ALTER COLUMN broker_connection_id SET NOT NULL
+        `);
+      } catch (rekeyError) {
+        logger.warn(`⚠️ Could not fully re-key stored_tokens to broker_connection_id: ${rekeyError.message}`);
+      }
       
       // Create indexes
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_user_id ON stored_tokens(user_id);`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_broker_connection_id ON stored_tokens(broker_connection_id);`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_updated_at ON stored_tokens(updated_at);`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_expires_at ON stored_tokens(expires_at);`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_stored_tokens_refresh_status ON stored_tokens(refresh_status);`);

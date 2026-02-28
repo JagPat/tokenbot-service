@@ -113,4 +113,35 @@ describe('TokenManager production guardrails', () => {
     expect(result).toBeNull();
     expect(legacySpy).not.toHaveBeenCalled();
   });
+
+  test('rejects brokerType-only lookup when multiple active connections exist', async () => {
+    mockCommonDeps(async (sql) => {
+      const normalizedSql = String(sql).replace(/\s+/g, ' ').trim();
+      if (
+        normalizedSql.includes('FROM "BrokerConnection"') &&
+        normalizedSql.includes('WHERE "userId" = $1') &&
+        normalizedSql.includes('AND "brokerType" = $2')
+      ) {
+        return {
+          rows: [
+            { id: 'conn-1', user_id: 'user-1', broker_type: 'ZERODHA', account_id: 'acc-1' },
+            { id: 'conn-2', user_id: 'user-1', broker_type: 'ZERODHA', account_id: 'acc-2' }
+          ]
+        };
+      }
+      return { rows: [] };
+    });
+
+    const tokenManager = require('../services/tokenManager');
+
+    await expect(
+      tokenManager.getCurrentToken({
+        userId: 'user-1',
+        brokerType: 'ZERODHA'
+      })
+    ).rejects.toMatchObject({
+      code: 'BROKER_CONNECTION_AMBIGUOUS',
+      statusCode: 409
+    });
+  });
 });

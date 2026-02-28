@@ -116,12 +116,24 @@ class EnvironmentCredentialSync {
                 encrypted.api_secret
             ]);
 
-            // 4. INVALIDATE EXISTING TOKEN
-            // This is crucial: We just changed credentials (potentially), so the old token 
-            // is likely invalid or mismatched. We must delete it so the Scheduler
-            // sees "No Token" and forces a fresh login immediately.
-            await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [botUserId]);
-            logger.info(`🗑️ [EnvSync] Invalidated/Deleted old access token for user: ${botUserId} to force refresh.`);
+            // 4. INVALIDATE EXISTING TOKENS FOR THIS USER'S ZERODHA CONNECTIONS
+            // This prevents stale sessions while still preserving other broker tokens.
+            let invalidatedCount = 0;
+            try {
+                const deleteResult = await db.query(`
+                  DELETE FROM stored_tokens st
+                  USING "BrokerConnection" bc
+                  WHERE st.broker_connection_id = bc.id
+                    AND bc."userId" = $1
+                    AND bc."brokerType" = 'ZERODHA'
+                `, [botUserId]);
+                invalidatedCount = deleteResult.rowCount || 0;
+            } catch (deleteByConnectionError) {
+                logger.warn(`⚠️ [EnvSync] Connection-scoped token delete failed, using user_id fallback: ${deleteByConnectionError.message}`);
+                const fallbackDelete = await db.query(`DELETE FROM stored_tokens WHERE user_id = $1`, [botUserId]);
+                invalidatedCount = fallbackDelete.rowCount || 0;
+            }
+            logger.info(`🗑️ [EnvSync] Invalidated ${invalidatedCount} Zerodha token row(s) for user: ${botUserId} to force refresh.`);
 
             logger.info(`✅ [EnvSync] Credentials successfully synced/updated from environment variables for user: ${botUserId}`);
 
