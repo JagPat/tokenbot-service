@@ -12,6 +12,7 @@ const puppeteer = require('puppeteer');
 const logger = require('../utils/logger');
 const os = require('os');
 const crypto = require('crypto');
+const soakMetrics = require('./soakMetrics');
 
 class BrowserPool {
   constructor(options = {}) {
@@ -124,6 +125,13 @@ class BrowserPool {
   _transitionToOpen(reason) {
     if (this.circuitBreaker.state !== 'OPEN') {
       this.stats.circuitTrips += 1;
+      soakMetrics.recordCircuitBreakerOpen({
+        source: 'tokenbot.browserPool',
+        breaker: 'browser_pool',
+        reason: reason || 'unknown',
+        failures: this.circuitBreaker.failures,
+        threshold: this.circuitBreaker.threshold
+      });
     }
 
     this.circuitBreaker.state = 'OPEN';

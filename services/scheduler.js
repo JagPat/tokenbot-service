@@ -4,6 +4,7 @@ const db = require('../config/database');
 const tokenManager = require('./tokenManager');
 const logger = require('../utils/logger');
 const { isDefaultUserId } = require('../utils/userIdPolicy');
+const soakMetrics = require('./soakMetrics');
 
 class Scheduler {
   constructor() {
@@ -45,6 +46,7 @@ class Scheduler {
         bc."accountId" AS account_id,
         bc."expiresAt" AS expires_at,
         bc."lastAuthAt" AS last_auth_at,
+        bc."lastSyncAt" AS last_sync_at,
         bc."status" AS status,
         kuc.kite_user_id
       FROM "BrokerConnection" bc
@@ -183,8 +185,16 @@ class Scheduler {
     this.isRunning = true;
     try {
       const expiringUsers = await this._listZerodhaConnections({ expiringOnly: true });
+      expiringUsers.forEach((row) => {
+        soakMetrics.recordBrokerSyncDrift({
+          connectionId: row.id,
+          brokerType: 'ZERODHA',
+          lastSyncAt: row.last_sync_at || null
+        });
+      });
       if (expiringUsers.length === 0) {
         logger.info('✅ [Scheduler] No Zerodha connections expiring soon (next 3 hours)');
+        soakMetrics.maybeSnapshot('tokenbot_refresh_expiring_zerodha_empty');
         return;
       }
 
@@ -232,6 +242,7 @@ class Scheduler {
     } catch (error) {
       logger.error(`❌ [Scheduler] Error in proactive refresh: ${error.message}`);
     } finally {
+      soakMetrics.maybeSnapshot('tokenbot_refresh_expiring_zerodha');
       this.isRunning = false;
     }
   }
@@ -250,7 +261,8 @@ class Scheduler {
           "userId" AS user_id,
           "accountId" AS account_id,
           "expiresAt" AS expires_at,
-          "lastAuthAt" AS last_auth_at
+          "lastAuthAt" AS last_auth_at,
+          "lastSyncAt" AS last_sync_at
         FROM "BrokerConnection"
         WHERE "brokerType" = 'DHAN'
           AND "isActive" = true
@@ -264,8 +276,16 @@ class Scheduler {
       `);
 
       const candidates = this._filterSchedulableUsers(result.rows || []);
+      candidates.forEach((row) => {
+        soakMetrics.recordBrokerSyncDrift({
+          connectionId: row.id,
+          brokerType: 'DHAN',
+          lastSyncAt: row.last_sync_at || null
+        });
+      });
       if (candidates.length === 0) {
         logger.info('✅ [Scheduler] No Dhan connections require proactive refresh');
+        soakMetrics.maybeSnapshot('tokenbot_refresh_expiring_dhan_empty');
         return;
       }
 
@@ -307,6 +327,7 @@ class Scheduler {
     } catch (error) {
       logger.error(`❌ [Scheduler] Error in Dhan proactive refresh: ${error.message}`);
     } finally {
+      soakMetrics.maybeSnapshot('tokenbot_refresh_expiring_dhan');
       this.isRunning = false;
     }
   }
@@ -341,10 +362,18 @@ class Scheduler {
 
     try {
       const users = await this._listZerodhaConnections();
+      users.forEach((row) => {
+        soakMetrics.recordBrokerSyncDrift({
+          connectionId: row.id,
+          brokerType: 'ZERODHA',
+          lastSyncAt: row.last_sync_at || null
+        });
+      });
       logger.info(`📋 [Scheduler] Found ${users.length} Zerodha connection(s) for token refresh`);
 
       if (users.length === 0) {
         logger.info('ℹ️ No Zerodha connections to refresh');
+        soakMetrics.maybeSnapshot('tokenbot_refresh_all_empty');
         return { success: [], failed: [] };
       }
 
@@ -422,6 +451,7 @@ class Scheduler {
       logger.error(`❌ [Scheduler] Error in refreshAllTokens: ${error.message}`);
       throw error;
     } finally {
+      soakMetrics.maybeSnapshot('tokenbot_refresh_all');
       this.isRunning = false;
     }
   }

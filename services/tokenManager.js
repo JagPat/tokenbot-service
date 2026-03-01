@@ -6,6 +6,7 @@ const { retryWithBackoff } = require('../utils/retry');
 const dhanAuthProvider = require('./providers/dhan');
 const { assertProductionSafeUserId, normalizeUserId } = require('../utils/userIdPolicy');
 const distributedLock = require('./distributedLock');
+const soakMetrics = require('./soakMetrics');
 const DhanTokenManager = require('./token-managers/DhanTokenManager');
 const ZerodhaTokenManager = require('./token-managers/ZerodhaTokenManager');
 
@@ -336,6 +337,13 @@ class TokenManager {
       } catch (syncError) {
         logger.error(`❌ Failed to persist canonical token for user ${userId}: ${syncError.message}`);
       }
+      soakMetrics.recordTokenRefreshResult({
+        success: true,
+        source: 'tokenManager._refreshTokenForUserInternal',
+        userId,
+        brokerType,
+        connectionId: connectionId || null
+      });
     } else {
       if (this.persistLegacyStoredTokenWrites) {
         try {
@@ -360,6 +368,16 @@ class TokenManager {
       if (result.guidance) {
         refreshError.guidance = result.guidance;
       }
+      soakMetrics.recordTokenRefreshResult({
+        success: false,
+        source: 'tokenManager._refreshTokenForUserInternal',
+        userId,
+        brokerType,
+        connectionId: connectionId || null,
+        reasonCode: failureCode,
+        reason: failureMessage,
+        statusCode: failureStatusCode
+      });
       throw refreshError;
     }
 
@@ -813,6 +831,15 @@ class TokenManager {
           })();
 
         if (!decryptResult.ok) {
+          if (soakMetrics.isInvalidAuthTagReason(decryptResult.reasonCode)) {
+            soakMetrics.recordInvalidAuthTag({
+              source: 'tokenManager._getBrokerConnectionToken',
+              connectionId: row.id,
+              brokerType,
+              reasonCode: decryptResult.reasonCode,
+              tokenFormat: decryptResult.format
+            });
+          }
           const decryptError = this._buildError(
             `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: ${decryptResult.reasonCode}`,
             500,
