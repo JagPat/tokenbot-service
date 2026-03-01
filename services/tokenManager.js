@@ -819,6 +819,30 @@ class TokenManager {
       };
 
     } catch (error) {
+      if (error.code === 'TOKEN_DECRYPT_FAILED_FORMAT') {
+        const corruptedConnectionId = this._normalizeConnectionId(error.brokerConnectionId || connectionId);
+        if (corruptedConnectionId) {
+          try {
+            await db.query(`
+              UPDATE "BrokerConnection"
+              SET
+                "accessTokenEncrypted" = NULL,
+                "lastError" = $2,
+                "updatedAt" = NOW()
+              WHERE id = $1
+            `, [
+              corruptedConnectionId,
+              String(error.message || 'Encrypted token could not be decrypted').substring(0, 450)
+            ]);
+          } catch (updateError) {
+            logger.warn(`⚠️ Failed to clear corrupted token payload for ${corruptedConnectionId}: ${updateError.message}`);
+          }
+        }
+
+        logger.warn(`⚠️ ${brokerType} token decrypt failed for connection ${corruptedConnectionId || connectionId || 'unknown'}; proceeding with fresh refresh flow`);
+        return null;
+      }
+
       logger.error(`❌ Error getting ${brokerType} token:`, error);
       // Fallback: If BrokerConnection table missing (not migrated yet?), fail gracefully
       if (error.message.includes('does not exist')) {
