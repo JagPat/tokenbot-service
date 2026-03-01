@@ -63,13 +63,13 @@ router.post('/refresh', async (req, res, next) => {
     // Support both user authentication and service-to-service calls
     let user_id = null;
     const connectionId = resolveConnectionId(req);
+    const isProduction = process.env.NODE_ENV === 'production';
     const brokerType = String(req.body.brokerType || req.query.brokerType || 'ZERODHA').toUpperCase();
     const accountId = req.body.accountId || req.query.accountId;
 
     // Check if authenticated user (user endpoint)
     if (req.user && req.user.user_id) {
       user_id = req.user.user_id;
-      logger.info(`🔄 User token refresh requested for user: ${user_id} (connection: ${connectionId || 'none'})`);
     }
     // Check if service-to-service call (backend endpoint)
     else if (req.body.user_id || req.query.user_id || connectionId) {
@@ -94,7 +94,6 @@ router.post('/refresh', async (req, res, next) => {
       }
 
       user_id = req.body.user_id || req.query.user_id || null;
-      logger.info(`🔄 Service token refresh requested for user: ${user_id || 'resolved-via-connection'} (connection: ${connectionId || 'none'})`);
     } else {
       return res.status(400).json({
         success: false,
@@ -103,9 +102,20 @@ router.post('/refresh', async (req, res, next) => {
       });
     }
 
+    if (isProduction && !connectionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'brokerConnectionId is required for refresh in production',
+        code: 'BROKER_CONNECTION_REQUIRED',
+        correlationId
+      });
+    }
+
     if (user_id) {
       user_id = assertProductionSafeUserId(user_id, 'refresh');
     }
+
+    logger.info(`🔄 Token refresh requested for user: ${user_id || 'resolved-via-connection'} (connection: ${connectionId || 'none'})`);
 
     const tokenData = await tokenManager.refreshTokenForUser({
       userId: user_id,
