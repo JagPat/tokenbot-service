@@ -122,6 +122,16 @@ async function initializeServices() {
     logger.warn(`⚠️ Missing environment variables: ${missingVars.join(', ')}`);
   }
 
+  const encryptionKeyFingerprint = typeof encryptor.getKeyFingerprint === 'function'
+    ? encryptor.getKeyFingerprint()
+    : null;
+  if (encryptionKeyFingerprint) {
+    logger.info(`🔐 ENCRYPTION_KEY fingerprint: ${encryptionKeyFingerprint}`);
+  }
+  logger.info(
+    `⚙️ Legacy token flags: ALLOW_STORED_TOKENS=${String(process.env.LEGACY_ALLOW_STORED_TOKENS || 'false')}, PERSIST_STORED_TOKENS=${String(process.env.LEGACY_PERSIST_STORED_TOKENS || 'false')}`
+  );
+
   // 1. Database Initialization (Async)
   if (process.env.DATABASE_URL) {
     try {

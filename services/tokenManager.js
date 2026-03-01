@@ -14,13 +14,26 @@ class TokenManager {
     this.inFlightRefreshes = new Map();
     this.refreshLockTtlMs = Math.max(5000, parseInt(process.env.TOKEN_REFRESH_LOCK_TTL_MS || '45000', 10));
     this.allowLegacyStoredTokenFallback = String(process.env.LEGACY_ALLOW_STORED_TOKENS || 'false').toLowerCase() === 'true';
+    this.persistLegacyStoredTokenWrites = String(process.env.LEGACY_PERSIST_STORED_TOKENS || 'false').toLowerCase() === 'true';
     this.dhanManager = new DhanTokenManager();
     this.zerodhaManager = new ZerodhaTokenManager();
 
+    const keyFingerprint = typeof encryptor.getKeyFingerprint === 'function'
+      ? encryptor.getKeyFingerprint()
+      : null;
+    if (keyFingerprint) {
+      logger.info(`🔐 Token encryption key fingerprint: ${keyFingerprint}`);
+    }
+
     if (this._isProduction()) {
-      this._logLegacyStoredTokenRows().catch((error) => {
-        logger.warn(`⚠️ Could not inspect legacy stored_tokens rows at startup: ${error.message}`);
-      });
+      if (this.persistLegacyStoredTokenWrites) {
+        logger.warn('⚠️ LEGACY_PERSIST_STORED_TOKENS=true. Legacy stored_tokens writes are enabled.');
+      }
+      if (this.allowLegacyStoredTokenFallback || this.persistLegacyStoredTokenWrites) {
+        this._logLegacyStoredTokenRows().catch((error) => {
+          logger.warn(`⚠️ Could not inspect legacy stored_tokens rows at startup: ${error.message}`);
+        });
+      }
     }
   }
 
@@ -306,7 +319,7 @@ class TokenManager {
     const result = await manager.refresh({ ...context, currentToken });
 
     if (result.success) {
-      // Sync token to stored_tokens table so getCurrentToken() can find it
+      // Canonical write path: BrokerConnection is the source of truth.
       try {
         await this.storeTokenData({
           user_id: userId,
@@ -321,20 +334,21 @@ class TokenManager {
           error_reason: null
         });
       } catch (syncError) {
-        logger.error(`❌ Failed to sync token to stored_tokens for user ${userId}: ${syncError.message}`);
+        logger.error(`❌ Failed to persist canonical token for user ${userId}: ${syncError.message}`);
       }
     } else {
-      // Log failure to stored tokens if it exists
-      try {
-        const storedTokenKey = this._buildStoredTokenKey({ connectionId, userId, brokerType, accountId });
-        await db.query(`
-            UPDATE stored_tokens 
-            SET refresh_status = 'failed', 
-                error_reason = $1,
-                updated_at = NOW()
-            WHERE broker_connection_id = $2
-          `, [String(result.error || 'Token refresh failed').substring(0, 500), storedTokenKey]);
-      } catch (e) { }
+      if (this.persistLegacyStoredTokenWrites) {
+        try {
+          const storedTokenKey = this._buildStoredTokenKey({ connectionId, userId, brokerType, accountId });
+          await db.query(`
+              UPDATE stored_tokens 
+              SET refresh_status = 'failed', 
+                  error_reason = $1,
+                  updated_at = NOW()
+              WHERE broker_connection_id = $2
+            `, [String(result.error || 'Token refresh failed').substring(0, 500), storedTokenKey]);
+        } catch (e) { }
+      }
 
       const failureMessage = String(result.error || 'Token refresh failed');
       const failureCode = String(result.error_code || 'TOKEN_REFRESH_FAILED');
@@ -503,13 +517,6 @@ class TokenManager {
     } = tokenData;
     const normalizedBrokerType = this._normalizeBrokerType(brokerType || 'ZERODHA');
     const normalizedConnectionId = this._normalizeConnectionId(connectionId || brokerConnectionId);
-    const storedTokenKey = this._buildStoredTokenKey({
-      connectionId: normalizedConnectionId,
-      userId: user_id,
-      brokerType: normalizedBrokerType,
-      accountId
-    });
-
     // Source of truth for live broker sessions is BrokerConnection.
     const shouldPersistBrokerConnection = Boolean(
       normalizedConnectionId || accountId || (normalizedBrokerType && normalizedBrokerType !== 'ZERODHA')
@@ -523,18 +530,30 @@ class TokenManager {
       );
     }
 
+    let brokerResult = null;
     if (shouldPersistBrokerConnection) {
-      const brokerResult = await this.storeBrokerConnectionToken({
+      brokerResult = await this.storeBrokerConnectionToken({
         ...tokenData,
         brokerType: normalizedBrokerType,
         connectionId: normalizedConnectionId
       });
-      if (normalizedBrokerType !== 'ZERODHA') {
-        return brokerResult;
-      }
     }
 
-    logger.info(`💾 Storing token data for user: ${user_id}`);
+    if (!this.persistLegacyStoredTokenWrites) {
+      if (this.allowLegacyStoredTokenFallback) {
+        logger.warn(`⚠️ Legacy token fallback is enabled but LEGACY_PERSIST_STORED_TOKENS is false. No stored_tokens writes will occur for user ${user_id}.`);
+      }
+      return brokerResult;
+    }
+
+    const storedTokenKey = this._buildStoredTokenKey({
+      connectionId: normalizedConnectionId,
+      userId: user_id,
+      brokerType: normalizedBrokerType,
+      accountId
+    });
+
+    logger.info(`💾 Storing legacy token row for user: ${user_id} (key: ${storedTokenKey})`);
 
     try {
       // Insert or update token data with refresh tracking
@@ -567,7 +586,7 @@ class TokenManager {
         error_reason || null
       ]);
 
-      logger.info(`✅ Token data stored successfully for user: ${user_id} (key: ${storedTokenKey}, status: ${refresh_status || 'success'})`);
+      logger.info(`✅ Legacy token row stored for user: ${user_id} (key: ${storedTokenKey}, status: ${refresh_status || 'success'})`);
       return result.rows[0];
 
     } catch (error) {
@@ -783,18 +802,37 @@ class TokenManager {
       // Decrypt access token
       let accessToken = null;
       if (row.accessTokenEncrypted) {
-        try {
-          accessToken = encryptor.decrypt(row.accessTokenEncrypted);
-        } catch (decErr) {
+        const decryptResult = typeof encryptor.decryptWithMeta === 'function'
+          ? encryptor.decryptWithMeta(row.accessTokenEncrypted, { allowLegacy: true })
+          : (() => {
+            try {
+              return { ok: true, value: encryptor.decrypt(row.accessTokenEncrypted), format: 'UNKNOWN', reasonCode: 'TOKEN_OK', shape: null };
+            } catch (error) {
+              return { ok: false, value: null, format: 'UNKNOWN', reasonCode: error.code || 'TOKEN_DECRYPT_FAILED', errorMessage: error.message, shape: null };
+            }
+          })();
+
+        if (!decryptResult.ok) {
           const decryptError = this._buildError(
-            `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: ${decErr.message}`,
+            `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: ${decryptResult.reasonCode}`,
             500,
             'TOKEN_DECRYPT_FAILED_FORMAT'
           );
           decryptError.brokerConnectionId = row.id;
+          decryptError.decryptContext = {
+            brokerType,
+            tokenFormat: decryptResult.format || 'UNKNOWN',
+            reasonCode: decryptResult.reasonCode || 'TOKEN_DECRYPT_FAILED',
+            tokenShape: decryptResult.shape || null
+          };
           throw decryptError;
         }
 
+        if (decryptResult.format === 'CBC') {
+          logger.warn(`⚠️ Legacy CBC token detected on BrokerConnection ${row.id}. Refresh should rewrite canonical GCM format.`);
+        }
+
+        accessToken = decryptResult.value;
         if (!accessToken) {
           const decryptError = this._buildError(
             `TOKEN_DECRYPT_FAILED_FORMAT for brokerConnectionId ${row.id}: decrypted token is empty`,
@@ -802,6 +840,12 @@ class TokenManager {
             'TOKEN_DECRYPT_FAILED_FORMAT'
           );
           decryptError.brokerConnectionId = row.id;
+          decryptError.decryptContext = {
+            brokerType,
+            tokenFormat: decryptResult.format || 'UNKNOWN',
+            reasonCode: 'TOKEN_DECRYPT_EMPTY',
+            tokenShape: decryptResult.shape || null
+          };
           throw decryptError;
         }
       }
@@ -821,6 +865,10 @@ class TokenManager {
     } catch (error) {
       if (error.code === 'TOKEN_DECRYPT_FAILED_FORMAT') {
         const corruptedConnectionId = this._normalizeConnectionId(error.brokerConnectionId || connectionId);
+        const decryptContext = error.decryptContext || {};
+        const reasonCode = decryptContext.reasonCode || 'TOKEN_DECRYPT_FAILED_FORMAT';
+        const tokenFormat = decryptContext.tokenFormat || 'UNKNOWN';
+        const safeFailure = `${reasonCode} (${tokenFormat})`;
         if (corruptedConnectionId) {
           try {
             await db.query(`
@@ -832,14 +880,20 @@ class TokenManager {
               WHERE id = $1
             `, [
               corruptedConnectionId,
-              String(error.message || 'Encrypted token could not be decrypted').substring(0, 450)
+              String(`Encrypted token could not be decrypted: ${safeFailure}`).substring(0, 450)
             ]);
           } catch (updateError) {
             logger.warn(`⚠️ Failed to clear corrupted token payload for ${corruptedConnectionId}: ${updateError.message}`);
           }
         }
 
-        logger.warn(`⚠️ ${brokerType} token decrypt failed for connection ${corruptedConnectionId || connectionId || 'unknown'}; proceeding with fresh refresh flow`);
+        logger.warn(`⚠️ ${brokerType} token decrypt failed for connection ${corruptedConnectionId || connectionId || 'unknown'}; proceeding with fresh refresh flow`, {
+          connectionId: corruptedConnectionId || connectionId || null,
+          brokerType,
+          tokenFormat,
+          reasonCode,
+          tokenShape: decryptContext.tokenShape || null
+        });
         return null;
       }
 

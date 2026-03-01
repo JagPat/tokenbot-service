@@ -31,7 +31,15 @@ describe('TokenManager production guardrails', () => {
 
     jest.doMock('../services/encryptor', () => ({
       encrypt: jest.fn((value) => `enc:${value}`),
-      decrypt: jest.fn((value) => (typeof value === 'string' && value.startsWith('enc:') ? value.slice(4) : value))
+      decrypt: jest.fn((value) => (typeof value === 'string' && value.startsWith('enc:') ? value.slice(4) : value)),
+      decryptWithMeta: jest.fn((value) => ({
+        ok: true,
+        value: typeof value === 'string' && value.startsWith('enc:') ? value.slice(4) : value,
+        format: 'GCM',
+        reasonCode: 'TOKEN_OK',
+        shape: { parts: 3, ivLength: 32, cipherLength: 64, tagLength: 32 }
+      })),
+      getKeyFingerprint: jest.fn(() => 'test-key-fp')
     }));
 
     jest.doMock('../utils/retry', () => ({
